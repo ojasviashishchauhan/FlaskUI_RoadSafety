@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}Image Details - Image Metadata Extractor{% endblock %}
+
+{% block head %}
+{% if image.metadata and image.metadata.get('latitude') and image.metadata.get('longitude') %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<style>
+    #map {
+        height: 300px;
+        width: 100%;
+        border-radius: 0.25rem;
+    }
+</style>
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<div class="mb-3">
+    <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">
+        <i class="fas fa-arrow-left me-1"></i> Back to Dashboard
+    </a>
+</div>
+
+<div class="row">
+    <div class="col-md-5">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Image Preview</h5>
+            </div>
+            <div class="card-body text-center">
+                <img src="{{ url_for('view_image', filename=image.filename) }}" alt="{{ image.filename }}" class="img-fluid rounded">
+            </div>
+            <div class="card-footer">
+                <div class="d-flex justify-content-between align-items-center">
+                    <span class="text-muted">Uploaded: {{ image.upload_time.strftime('%Y-%m-%d %H:%M') }}</span>
+                    <div>
+                        <a href="{{ url_for('view_image', filename=image.filename) }}" class="btn btn-sm btn-outline-primary" target="_blank">
+                            <i class="fas fa-external-link-alt me-1"></i> Open Original
+                        </a>
+                        <form action="{{ url_for('delete_image', image_id=image._id) }}" method="POST" class="d-inline ms-1">
+                            <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Are you sure you want to delete this image?');">
+                                <i class="fas fa-trash-alt"></i> Delete
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% if image.metadata and image.metadata.get('latitude') and image.metadata.get('longitude') %}
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Location</h5>
+            </div>
+            <div class="card-body p-0">
+                <div id="map"></div>
+            </div>
+            <div class="card-footer">
+                <div class="row">
+                    <div class="col-6">
+                        <small class="text-muted">Latitude</small>
+                        <p class="mb-0">{{ image.metadata.latitude }}</p>
+                    </div>
+                    <div class="col-6">
+                        <small class="text-muted">Longitude</small>
+                        <p class="mb-0">{{ image.metadata.longitude }}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="col-md-7">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Metadata</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-striped metadata-table">
+                        <tbody>
+                            <tr>
+                                <th style="width: 35%">Filename</th>
+                                <td>{{ image.metadata.filename }}</td>
+                            </tr>
+                            <tr>
+                                <th>Dimensions</th>
+                                <td>{{ image.metadata.width }} × {{ image.metadata.height }} pixels</td>
+                            </tr>
+                            <tr>
+                                <th>Format</th>
+                                <td>{{ image.metadata.format }}</td>
+                            </tr>
+                            <tr>
+                                <th>Mode</th>
+                                <td>{{ image.metadata.mode }}</td>
+                            </tr>
+                            {% if image.metadata.get('date_taken') %}
+                            <tr>
+                                <th>Date Taken</th>
+                                <td>{{ image.metadata.date_taken }}</td>
+                            </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+
+                {% if image.metadata.get('exif') %}
+                <h6 class="mt-4 mb-3">EXIF Data (Raw)</h6>
+                <div class="table-responsive">
+                    <table class="table table-sm table-striped metadata-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 35%">Tag</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for tag, value in image.metadata.exif.items() %}
+                            {% if tag != 'GPSInfo' and tag != 'MakerNote' and value is not mapping %}
+                            <tr>
+                                <td>{{ tag }}</td>
+                                <td>{{ value }}</td>
+                            </tr>
+                            {% endif %}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if image.metadata and image.metadata.get('latitude') and image.metadata.get('longitude') %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const lat = {{ image.metadata.latitude }};
+        const lng = {{ image.metadata.longitude }};
+        
+        const map = L.map('map').setView([lat, lng], 13);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+        
+        L.marker([lat, lng]).addTo(map)
+            .bindPopup('Photo location')
+            .openPopup();
+    });
+</script>
+{% endif %}
+{% endblock %} 

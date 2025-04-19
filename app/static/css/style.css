@@ -1,0 +1,135 @@
+/* Main Styles */
+body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    background-color: #f8f9fa;
+}
+
+.footer {
+    margin-top: auto;
+}
+
+/* Card styles */
+.card {
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+    transition: all 0.3s ease;
+    border: none; /* Cleaner look */
+}
+
+.card:hover {
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+}
+
+/* Dashboard styles */
+.card-img-top {
+    height: 200px;
+    object-fit: cover;
+}
+
+/* Form styles */
+.form-control:focus {
+    border-color: #0d6efd;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+}
+
+/* Table styles */
+.table-responsive {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Image detail view */
+.img-fluid.rounded {
+    max-height: 400px;
+    width: auto;
+}
+
+/* Map marker popup */
+.leaflet-popup-content-wrapper {
+    padding: 0;
+}
+
+.leaflet-popup-content {
+    margin: 10px;
+    text-align: center;
+}
+
+/* Custom animations */
+.fade-in {
+    animation: fadeIn 0.5s;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .card-img-top {
+        height: 150px;
+    }
+    
+    .img-fluid.rounded {
+        max-height: 300px;
+    }
+}
+
+/* --- NEW/UPDATED STYLES --- */
+
+/* Enhance Table View */
+.table th {
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.table td {
+    vertical-align: middle;
+}
+
+.dashboard-thumbnail {
+    max-height: 50px; /* Increased slightly */
+    width: 75px; /* Fixed width for consistency */
+    border-radius: 0.25rem;
+    object-fit: cover;
+    border: 1px solid #dee2e6; /* Subtle border */
+}
+
+/* Improve Image Details Page */
+.metadata-table th {
+    width: 30%;
+    font-weight: 500;
+    background-color: #f8f9fa; /* Light background for header */
+}
+
+.metadata-table td {
+    word-break: break-word;
+}
+
+/* Improve Upload Form */
+.upload-instructions {
+    font-size: 0.9rem;
+    color: #6c757d;
+}
+
+/* Card Enhancements */
+.card-header {
+    background-color: #e9ecef;
+    border-bottom: 1px solid #dee2e6;
+    font-weight: 500;
+}
+
+/* Button Consistency */
+.btn {
+    border-radius: 0.3rem;
+}
+
+/* Charts Loading Placeholder */
+.charts-loading {
+    min-height: 200px; /* Ensure space while loading */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #6c757d;
+} 

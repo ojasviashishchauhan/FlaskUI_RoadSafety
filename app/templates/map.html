@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Map View - Image Metadata Extractor{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<style>
+    #map {
+        height: 600px;
+        width: 100%;
+        border-radius: 0.25rem;
+    }
+    .photo-popup img {
+        max-width: 150px;
+        max-height: 150px;
+        display: block;
+        margin: 0 auto 10px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Image Locations</h5>
+            </div>
+            <div class="card-body p-0">
+                <div id="map"></div>
+            </div>
+            <div class="card-footer">
+                <small class="text-muted">
+                    <i class="fas fa-info-circle me-1"></i> Displaying images that have GPS coordinates in their metadata.
+                </small>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        // Parse the geo_images JSON from Python
+        const geoImages = {{ geo_images|safe }};
+        
+        if (geoImages.length === 0) {
+            document.getElementById('map').innerHTML = '<div class="alert alert-info m-3 text-center py-5"><i class="fas fa-map-marker-alt fa-3x mb-3"></i><h4>No Images with Location Data</h4><p>Upload images with GPS coordinates to see them on the map.</p></div>';
+            return;
+        }
+        
+        // Initialize the map
+        const map = L.map('map');
+        
+        // Add the OpenStreetMap tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+        
+        // Add markers for each image
+        const markers = [];
+        
+        geoImages.forEach(function(image) {
+            const marker = L.marker([image.latitude, image.longitude])
+                .addTo(map)
+                .bindPopup(`
+                    <div class="photo-popup text-center">
+                        <img src="${image.thumbnail}" alt="${image.filename}" class="img-thumbnail">
+                        <strong>${image.filename}</strong><br>
+                        <a href="/image/${image.id}" class="btn btn-sm btn-primary mt-2">View Details</a>
+                    </div>
+                `);
+            
+            markers.push(marker);
+        });
+        
+        // Create a bounds object and extend it with all markers
+        if (markers.length > 0) {
+            const bounds = L.featureGroup(markers).getBounds();
+            map.fitBounds(bounds, { padding: [50, 50] });
+        }
+    });
+</script>
+{% endblock %}
