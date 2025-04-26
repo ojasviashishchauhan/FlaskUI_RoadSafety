@@ -1,137 +1,86 @@
+from datetime import datetime
 from flask_login import UserMixin
 from werkzeug.security import generate_password_hash, check_password_hash
-from app import db, login_manager
-from bson.objectid import ObjectId
+from app import login_manager
+from bson import ObjectId
+from mongoengine import Document, StringField, DateTimeField, DictField, FloatField, ListField, ObjectIdField, BooleanField
 
-class User(UserMixin):
-    def __init__(self, username, email, password=None, _id=None, password_hash=None, is_admin=False):
-        self.username = username
-        self.email = email
-        if password:
-            self.password_hash = generate_password_hash(password)
-        else:
-            self.password_hash = password_hash  # Use existing hash if provided
-        self._id = _id
-        self.is_admin = is_admin # Add admin flag
+class User(Document, UserMixin):
+    username = StringField(required=True, unique=True)
+    email = StringField(required=True, unique=True)
+    password_hash = StringField(required=True)
+    role = StringField(default='user', choices=['user', 'admin'])
+    created_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        'collection': 'users',
+        'indexes': [
+            'username',
+            'email'
+        ],
+        'strict': False
+    }
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):
-        if not self.password_hash:
-            return False  # Cannot check password if hash is missing
         return check_password_hash(self.password_hash, password)
 
-    def save(self):
-        if not self._id:
-            user_data = {
-                'username': self.username,
-                'email': self.email,
-                'password_hash': self.password_hash,
-                'is_admin': self.is_admin # Save admin flag
-            }
-            result = db.users.insert_one(user_data)
-            self._id = result.inserted_id
-        return self._id
-
-    @staticmethod
-    def get_by_username(username):
-        user_data = db.users.find_one({'username': username})
-        if user_data:
-            return User(
-                username=user_data['username'],
-                email=user_data['email'],
-                _id=user_data['_id'],
-                password_hash=user_data.get('password_hash'),
-                is_admin=user_data.get('is_admin', False) # Load admin flag
-            )
-        return None
-
-    @staticmethod
-    def get_by_email(email):
-        user_data = db.users.find_one({'email': email})
-        if user_data:
-            return User(
-                username=user_data['username'],
-                email=user_data['email'],
-                _id=user_data['_id'],
-                password_hash=user_data.get('password_hash'),
-                is_admin=user_data.get('is_admin', False) # Load admin flag
-            )
-        return None
-
-    @staticmethod
-    def get_by_id(user_id):
-        try: # Add try-except for invalid ObjectId
-            user_data = db.users.find_one({'_id': ObjectId(user_id)})
-        except Exception: # Handle potential ObjectId conversion error
-            return None
-        if user_data:
-            return User(
-                username=user_data['username'],
-                email=user_data['email'],
-                _id=user_data['_id'],
-                password_hash=user_data.get('password_hash'),
-                is_admin=user_data.get('is_admin', False) # Load admin flag
-            )
-        return None
-
     def get_id(self):
-        return str(self._id)
+        return str(self.id)
 
-class Image:
-    def __init__(self, filename, user_id, metadata=None, upload_time=None, _id=None):
-        self.filename = filename
-        self.user_id = user_id
-        self.metadata = metadata or {}
-        self.upload_time = upload_time
-        self._id = _id
+    @property
+    def is_admin(self):
+        return self.role == 'admin'
 
-    def save(self):
-        image_data = {
-            'filename': self.filename,
-            'user_id': ObjectId(self.user_id),
-            'metadata': self.metadata,
-            'upload_time': self.upload_time
-        }
-        result = db.images.insert_one(image_data)
-        self._id = result.inserted_id
-        return self._id
+class Image(Document):
+    filename = StringField()
+    original_filename = StringField()
+    file_path = StringField()
+    user_id = ObjectIdField(required=True)
+    upload_time = DateTimeField(default=datetime.utcnow)
+    completion_time = DateTimeField()
+    processing_status = StringField(default='pending')
+    error_message = StringField()
+    image_type = StringField()
+    metadata = DictField(default={})
+    location = DictField(default={})
+    prediction_results = DictField(default={})
+    confidence_score = FloatField()
+    processing_time = FloatField()
+    annotated_image_path = StringField()
 
-    @staticmethod
-    def get_by_user_id(user_id):
-        # Query for images where user_id matches either the string OR the ObjectId
-        try:
-            user_id_obj = ObjectId(user_id)
-            query = {
-                '$or': [
-                    {'user_id': user_id},       # Match string ID (for older data)
-                    {'user_id': user_id_obj}  # Match ObjectId (for newer data)
-                ]
-            }
-            return list(db.images.find(query).sort('upload_time', -1))
-        except Exception as e:
-            # Fallback or handle error if ObjectId conversion fails (shouldn't for valid user_id)
-            print(f"[ERROR] Error in get_by_user_id query for user {user_id}: {e}")
-            # Attempt query with just string ID as fallback?
-            try:
-                 return list(db.images.find({'user_id': user_id}).sort('upload_time', -1))
-            except Exception:
-                 return [] # Return empty list if all fails
+    meta = {
+        'collection': 'images',
+        'indexes': [
+            'user_id',
+            'upload_time',
+            'processing_status',
+            'filename'
+        ],
+        'strict': False
+    }
 
-    @staticmethod
-    def get_by_id(image_id):
-        try: # Add try-except for invalid ObjectId
-            return db.images.find_one({'_id': ObjectId(image_id)})
-        except Exception:
-            return None
+    def to_dict(self):
+        """Convert document to dictionary suitable for templates"""
+        data = self.to_mongo().to_dict()
+        data['id'] = str(data.pop('_id'))
+        
+        if isinstance(data.get('upload_time'), datetime):
+            data['upload_time'] = data['upload_time'].isoformat()
+        if isinstance(data.get('completion_time'), datetime):
+            data['completion_time'] = data['completion_time'].isoformat()
+            
+        if 'user_id' in data and isinstance(data['user_id'], ObjectId):
+             data['user_id'] = str(data['user_id'])
 
-    @staticmethod
-    def delete_by_id(image_id):
-        """Deletes an image record from the database by its ID."""
-        try:
-            result = db.images.delete_one({'_id': ObjectId(image_id)})
-            return result.deleted_count > 0
-        except Exception:
-            return False
+        return data
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.get_by_id(user_id) 
+    try:
+        return User.objects(id=user_id).first()
+    except Exception as e:
+        print(f"Error loading user {user_id}: {e}")
+        return None 

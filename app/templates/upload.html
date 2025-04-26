@@ -37,6 +37,21 @@
                             </div>
                         </div>
                         
+                        <div class="mb-3">
+                            {{ form.image_type.label(class="form-label") }}
+                            {% if form.image_type.errors %}
+                                {{ form.image_type(class="form-select is-invalid") }}
+                                <div class="invalid-feedback">
+                                    {% for error in form.image_type.errors %}
+                                        {{ error }}
+                                    {% endfor %}
+                                </div>
+                            {% else %}
+                                {{ form.image_type(class="form-select") }}
+                            {% endif %}
+                            <div class="form-text">Select the type of road damage in the images</div>
+                        </div>
+                        
                         <div class="d-grid gap-2 mt-4">
                             {{ form.submit(class="btn btn-primary") }}
                         </div>

@@ -12,16 +12,29 @@ import exifread # Import exifread
 from exifread.utils import Ratio # Import Ratio for type checking
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+from app import app
 
 # Initialize geolocator globally but cautiously (consider thread safety if scaling heavily)
 # Using a specific user_agent is required by Nominatim's policy
 geolocator = Nominatim(user_agent="flask_image_mapper_v1")
 
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'heic', 'heif'}
+
+def allowed_file(filename):
+    """Check if the file extension is allowed."""
+    return '.' in filename and \
+           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def is_video_file(filename):
+    video_extensions = {'mp4', 'avi', 'mov', 'webm'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in video_extensions
+
 def _sanitize_for_bson(data):
     """Recursively sanitize data to ensure BSON compatibility."""
     if isinstance(data, collections.abc.Mapping):
         # Handle dictionaries (and other mapping types)
-        return {key: _sanitize_for_bson(value) for key, value in data.items()}
+        # Convert all keys to strings to ensure BSON compatibility
+        return {str(key): _sanitize_for_bson(value) for key, value in data.items()}
     elif isinstance(data, (list, tuple)):
         # Handle lists and tuples
         return [_sanitize_for_bson(item) for item in data]
@@ -99,6 +112,13 @@ def extract_image_metadata(image_path):
                     except (ValueError, TypeError):
                         print("[WARN] Failed to parse image dimensions from EXIF")
                 
+                # Extract camera model information
+                if 'Image Make' in tags:
+                    metadata['camera_make'] = str(tags['Image Make']).strip()
+                if 'Image Model' in tags:
+                    metadata['camera_model'] = str(tags['Image Model']).strip()
+                    print(f"[DEBUG] Found camera model: {metadata['camera_model']}")
+                
                 # Extract GPS data
                 lat_tag = tags.get('GPS GPSLatitude')
                 lat_ref_tag = tags.get('GPS GPSLatitudeRef')
@@ -165,11 +185,18 @@ def extract_image_metadata(image_path):
                 print("[DEBUG] Image format is HEIF, using exifread library") # DEBUG
                 try:
                     with open(image_path, 'rb') as f:
-                        tags = exifread.process_file(f, stop_tag='DateTimeOriginal') # Optimization
+                        tags = exifread.process_file(f)
                     
                     print(f"[DEBUG HEIF ExifRead] Found {len(tags)} tags.") # DEBUG
                     # Store raw tags (after sanitization) for display if needed
-                    exif_data = {tag: tags[tag] for tag in tags} 
+                    exif_data = {tag: tags[tag] for tag in tags}
+                    
+                    # Extract camera model information
+                    if 'Image Make' in tags:
+                        metadata['camera_make'] = str(tags['Image Make']).strip()
+                    if 'Image Model' in tags:
+                        metadata['camera_model'] = str(tags['Image Model']).strip()
+                        print(f"[DEBUG] Found camera model: {metadata['camera_model']}")
                     
                     # Extract GPS data using exifread tags
                     lat_tag = tags.get('GPS GPSLatitude')
@@ -217,96 +244,54 @@ def extract_image_metadata(image_path):
                 if hasattr(image, '_getexif'):
                     raw_exif_dict = image._getexif()
                     if raw_exif_dict:
-                         print(f"[DEBUG] Raw EXIF data found (length: {len(raw_exif_dict)})") # DEBUG
-                    else:
-                         print(f"[DEBUG] image._getexif() returned None or empty.") # DEBUG
-                else:
-                     print(f"[DEBUG] image object has no _getexif attribute.") # DEBUG
-
-                # Process the extracted EXIF dictionary (if any)
-                if raw_exif_dict:
-                    # Create a new dictionary to store EXIF data with string keys
-                    string_keyed_exif_data = {}
-                    
-                    for tag_id, value in raw_exif_dict.items():
-                        # Decode the tag ID into a string name, fallback to str(ID)
-                        tag_name = TAGS.get(tag_id, str(tag_id))
+                        print(f"[DEBUG] Raw EXIF data found (length: {len(raw_exif_dict)})") # DEBUG
                         
-                        # Use the known tag name (if available) for specific checks
-                        tag = TAGS.get(tag_id) 
+                        # Extract camera model information
+                        for tag_id, value in raw_exif_dict.items():
+                            tag_name = TAGS.get(tag_id, str(tag_id))
+                            if tag_name == 'Make':
+                                metadata['camera_make'] = str(value).strip()
+                            elif tag_name == 'Model':
+                                metadata['camera_model'] = str(value).strip()
+                                print(f"[DEBUG] Found camera model: {metadata['camera_model']}")
+                            
+                            # Store all EXIF data
+                            if isinstance(tag_name, str):
+                                exif_data[tag_name] = value
                         
-                        # Handle GPS data specially (using Pillow's format)
-                        if tag == 'GPSInfo':
-                            print(f"[DEBUG] Found GPSInfo tag (ID: {tag_id})") # DEBUG
-                            gps_info_dict = value
-                            gps_data = {} # Used for lat/lon extraction
-                            string_keyed_gps_data = {} # For storing in metadata['exif']
+                        # Handle GPS data
+                        if 'GPSInfo' in exif_data:
+                            gps_data = {}
+                            for gps_tag_id, gps_value in exif_data['GPSInfo'].items():
+                                gps_tag_name = GPSTAGS.get(gps_tag_id, str(gps_tag_id))
+                                gps_data[gps_tag_name] = gps_value
                             
-                            if isinstance(gps_info_dict, dict):
-                                for gps_tag_id, gps_value in gps_info_dict.items():
-                                    # Get string key for GPS tag
-                                    gps_tag_name = GPSTAGS.get(gps_tag_id, str(gps_tag_id))
-                                    string_keyed_gps_data[gps_tag_name] = gps_value # Store with string key
-                                    
-                                    # Also populate gps_data for lat/lon calculation
-                                    # (using the standard tag name if available)
-                                    gps_tag = GPSTAGS.get(gps_tag_id)
-                                    if gps_tag:
-                                         gps_data[gps_tag] = gps_value
-                            else:
-                                print(f"[WARN] GPSInfo value was not a dictionary (Type: {type(gps_info_dict)}). Cannot parse GPS tags.")
-                            
-                            # Store the string-keyed GPS dict within the main string-keyed EXIF dict
-                            string_keyed_exif_data[tag_name] = string_keyed_gps_data
-                            
-                            print(f"[DEBUG GPS] Parsed gps_data dictionary for lat/lon calc: {gps_data}")
-                            
-                            lat = None
-                            lon = None
-                            if 'GPSLatitude' in gps_data and 'GPSLatitudeRef' in gps_data:
-                                lat = _convert_to_degrees(gps_data['GPSLatitude'])
-                                if lat is not None:
+                            if all(k in gps_data for k in ['GPSLatitude', 'GPSLatitudeRef', 'GPSLongitude', 'GPSLongitudeRef']):
+                                try:
+                                    lat = _convert_to_degrees(gps_data['GPSLatitude'])
                                     if gps_data['GPSLatitudeRef'] == 'S':
                                         lat = -lat
-                                    metadata['latitude'] = lat
-                                    print(f"[DEBUG] Calculated Latitude: {lat}") # DEBUG
-                        
-                            if 'GPSLongitude' in gps_data and 'GPSLongitudeRef' in gps_data:
-                                lon = _convert_to_degrees(gps_data['GPSLongitude'])
-                                if lon is not None:
+                                    lon = _convert_to_degrees(gps_data['GPSLongitude'])
                                     if gps_data['GPSLongitudeRef'] == 'W':
                                         lon = -lon
+                                    metadata['latitude'] = lat
                                     metadata['longitude'] = lon
-                                    print(f"[DEBUG] Calculated Longitude: {lon}") # DEBUG
-                            else:
-                                print("[WARN] Could not convert longitude values.")
-                        else:
-                            # For non-GPS tags, store directly with string key
-                            string_keyed_exif_data[tag_name] = value 
-                
-                    # Add date taken if available (check by tag ID in raw dict)
-                    dateTimeOriginalTagId = 36867 # EXIF DateTimeOriginal tag ID
-                    if dateTimeOriginalTagId in raw_exif_dict:
-                        # Ensure date_taken is also added to the string_keyed dict if needed for consistency
-                        # Though it's primarily stored directly in metadata
-                        date_str = str(raw_exif_dict[dateTimeOriginalTagId])
-                        metadata['date_taken'] = date_str 
-                        string_keyed_exif_data['DateTimeOriginal'] = date_str 
-                
-                    # Assign the dictionary with STRING keys to metadata['exif']
-                    metadata['exif'] = string_keyed_exif_data
+                                except Exception as e:
+                                    print(f"[ERROR] Failed to process GPS data: {e}")
+                    else:
+                        print(f"[DEBUG] image._getexif() returned None or empty.") # DEBUG
                 else:
-                     print(f"[DEBUG] No EXIF data dictionary found to process for non-HEIF.") # DEBUG
+                    print(f"[DEBUG] image object has no _getexif attribute.") # DEBUG
             
-            print(f"[DEBUG] Metadata before sanitization: {metadata}") # DEBUG
+            # Add the processed EXIF data to metadata
+            metadata['exif'] = _sanitize_for_bson(exif_data)
+            
             # Final sanitization pass on the whole dictionary before returning
-            sanitized_metadata = _sanitize_for_bson(metadata)
-            print(f"[DEBUG] Metadata after sanitization: {sanitized_metadata}") # DEBUG
-            return sanitized_metadata
+            return _sanitize_for_bson(metadata)
+            
     except Exception as e:
-        print(f"[ERROR] Exception during metadata extraction: {e}") # DEBUG
-        # Sanitize error message as well
-        return _sanitize_for_bson({'error': str(e), 'filename': os.path.basename(image_path)})
+        print(f"[ERROR] Failed to extract metadata: {e}")
+        return {'error': str(e), 'filename': os.path.basename(image_path)}
 
 def _convert_to_degrees(value):
     """

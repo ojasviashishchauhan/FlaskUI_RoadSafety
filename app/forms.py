@@ -1,10 +1,12 @@
 from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, SubmitField, EmailField
+from wtforms import StringField, PasswordField, SubmitField, EmailField, SelectField
 from wtforms.validators import DataRequired, Email, EqualTo, Length, ValidationError
 from wtforms import MultipleFileField
 from wtforms.validators import InputRequired
 from flask_wtf.file import FileAllowed
 from app.models import User
+from app.utils import allowed_file
+from werkzeug.utils import secure_filename
 
 class LoginForm(FlaskForm):
     username = StringField('Username', validators=[DataRequired()])
@@ -29,9 +31,19 @@ class RegistrationForm(FlaskForm):
             raise ValidationError('Email already registered. Please use a different one.')
 
 class ImageUploadForm(FlaskForm):
-    images = MultipleFileField('Select Images', validators=[
-        InputRequired(),
-        FileAllowed(['jpg', 'jpeg', 'png', 'heic', 'heif', 'JPG', 'JPEG', 'PNG', 'HEIC', 'HEIF'], 
-                    'Images only (jpg, jpeg, png, heic, heif)!')
-    ])
-    submit = SubmitField('Upload Images') 
+    images = MultipleFileField('Select Images', validators=[DataRequired()])
+    image_type = SelectField('Image Type', choices=[
+        ('Potholes', 'Potholes'),
+        ('Longitudinal', 'Longitudinal Cracks'),
+        ('Transverse', 'Transverse Cracks'),
+        ('Alligator', 'Alligator Cracks')
+    ], validators=[DataRequired()])
+    submit = SubmitField('Upload Images')
+
+    def validate_images(self, field):
+        if not field.data:
+            raise ValidationError('Please select at least one file.')
+        for upload in field.data:
+            filename = secure_filename(upload.filename)
+            if not allowed_file(filename):
+                raise ValidationError('Invalid file type.') 

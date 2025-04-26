@@ -1,626 +1,393 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard - Image Metadata Extractor{% endblock %}
+{% block title %}Dashboard - Road Damage Analysis{% endblock %}
+
+{% block styles %}
+{{ super() }}
+<style>
+.processing-overlay {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 1050;
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 12px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    padding: 15px 20px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.processing-spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #3498db;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+.image-card {
+    transition: all 0.3s ease;
+    border: none;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    position: relative;
+}
+
+.image-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.image-processing {
+    position: relative;
+}
+
+.image-processing::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(255, 255, 255, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+}
+
+.processing-indicator {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 2;
+    text-align: center;
+}
+
+.card-body {
+    position: relative;
+    z-index: 3;  /* Ensure card body content stays above the processing overlay */
+}
+
+.status-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-weight: 600;
+    font-size: 0.8rem;
+    z-index: 10;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.status-badge.damage-detected {
+    background-color: rgba(255, 193, 7, 0.95);
+    color: #000;
+}
+
+.status-badge.no-damage {
+    background-color: rgba(40, 167, 69, 0.95);
+    color: #fff;
+}
+
+.status-badge.processing {
+    background-color: rgba(13, 110, 253, 0.95);
+    color: #fff;
+}
+
+.status-badge.failed {
+    background-color: rgba(220, 53, 69, 0.95);
+    color: #fff;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+</style>
+{% endblock %}
 
 {% block content %}
-{# Add Search Form #}
-<div class="mb-4 card card-body shadow-sm">
-    <form method="GET" action="{{ url_for('dashboard') }}">
-        <div class="input-group">
-            <input type="text" class="form-control" placeholder="Search by filename..." name="search" value="{{ request.args.get('search', '') }}">
-            <button class="btn btn-outline-secondary" type="submit"><i class="fas fa-search"></i> Search</button>
-            {% if request.args.get('search') %}
-            <a href="{{ url_for('dashboard') }}" class="btn btn-outline-danger" title="Clear Search"><i class="fas fa-times"></i></a>
-            {% endif %}
-        </div>
-    </form>
+<!-- Processing Status Overlay -->
+<div id="processingAlert" class="processing-overlay">
+    <div class="processing-spinner"></div>
+    <span id="processingMessage" class="text-muted">Analyzing images...</span>
 </div>
 
-<div class="d-flex justify-content-between align-items-center mb-4">
-    <h2>Your Images</h2>
-    <div>
-        <a href="{{ url_for('upload') }}" class="btn btn-primary">
-            <i class="fas fa-upload me-1"></i> Upload New Image
-        </a>
-        <a href="{{ url_for('export_csv') }}" class="btn btn-outline-secondary ms-2">
-            <i class="fas fa-file-csv me-1"></i> Export to CSV
-        </a>
-    </div>
-</div>
-
-{% if images %}
-    <div class="row">
-        <div class="col-12">
-            <div class="card">
-                <div class="card-header">
-                    <ul class="nav nav-tabs card-header-tabs" id="dashboard-tabs" role="tablist">
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link active" id="gallery-tab" data-bs-toggle="tab" data-bs-target="#gallery" type="button" role="tab" aria-controls="gallery" aria-selected="true">
-                                <i class="fas fa-images me-1"></i> Gallery
-                            </button>
-                        </li>
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="table-tab" data-bs-toggle="tab" data-bs-target="#table" type="button" role="tab" aria-controls="table" aria-selected="false">
-                                <i class="fas fa-table me-1"></i> Table View
-                            </button>
-                        </li>
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="charts-tab" data-bs-toggle="tab" data-bs-target="#charts" type="button" role="tab" aria-controls="charts" aria-selected="false">
-                                <i class="fas fa-chart-pie me-1"></i> Charts
-                            </button>
-                        </li>
-                    </ul>
+<div class="container-fluid py-4">
+    <div class="row mb-4">
+        <div class="col">
+            <div class="d-flex justify-content-between align-items-center">
+                <h2>Road Damage Analysis</h2>
+                <div>
+                    <a href="{{ url_for('upload') }}" class="btn btn-primary">
+                        <i class="fas fa-upload"></i> Upload Images
+                    </a>
+                    {% if images %}
+                    <a href="{{ url_for('export_csv') }}" class="btn btn-outline-secondary ms-2">
+                        <i class="fas fa-file-export"></i> Export Data
+                    </a>
+                    {% endif %}
                 </div>
-                <div class="card-body">
-                    <div class="tab-content" id="dashboard-tabs-content">
-                        <div class="tab-pane fade show active" id="gallery" role="tabpanel" aria-labelledby="gallery-tab">
-                            <div class="row row-cols-1 row-cols-md-3 g-4">
-                                {% for image in images %}
-                                    <div class="col">
-                                        <div class="card h-100">
-                                            <div class="position-relative">
-                                                <img src="{{ url_for('view_image', filename=image.filename) }}" class="card-img-top" alt="{{ image.filename }}">
-                                                {% if image.metadata and image.metadata.get('latitude') and image.metadata.get('longitude') %}
-                                                    <span class="position-absolute bottom-0 end-0 badge bg-success m-2" title="Has GPS data">
-                                                        <i class="fas fa-map-marker-alt"></i>
-                                                    </span>
-                                                {% endif %}
-                                            </div>
-                                            <div class="card-body">
-                                                <h5 class="card-title text-truncate">{{ image.filename }}</h5>
-                                                <p class="card-text text-muted">
-                                                    <small>
-                                                        Uploaded: {{ image.upload_time.strftime('%Y-%m-%d %H:%M') }}
-                                                    </small>
-                                                </p>
-                                                <a href="{{ url_for('image_details', image_id=image._id) }}" class="btn btn-sm btn-primary">
-                                                    View Details
-                                                </a>
-                                                <form action="{{ url_for('delete_image', image_id=image._id) }}" method="POST" class="d-inline ms-1">
-                                                    <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Are you sure you want to delete this image?');">
-                                                        <i class="fas fa-trash-alt"></i> Delete
-                                                    </button>
-                                                </form>
-                                            </div>
-                                        </div>
-                                    </div>
-                                {% endfor %}
-                            </div>
+            </div>
+        </div>
+    </div>
+
+    {% if images %}
+    <ul class="nav nav-tabs mb-4">
+        <li class="nav-item">
+            <a class="nav-link {% if view != 'table' %}active{% endif %}" id="grid-tab" data-bs-toggle="tab" href="#grid-view">
+                <i class="fas fa-th"></i> Grid View
+            </a>
+        </li>
+        <li class="nav-item">
+            <a class="nav-link {% if view == 'table' %}active{% endif %}" id="table-tab" data-bs-toggle="tab" href="#table-view">
+                <i class="fas fa-table"></i> Table View
+            </a>
+        </li>
+    </ul>
+
+    <div class="tab-content">
+        <div class="tab-pane fade {% if view != 'table' %}show active{% endif %}" id="grid-view">
+            <div class="row">
+                {% for image in images %}
+                <div class="col-md-4 mb-4">
+                    <div class="card h-100">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <small class="text-muted">{{ image.upload_time.strftime('%Y-%m-%d %H:%M:%S') }}</small>
+                            <span class="badge bg-info">{{ image.image_type|title }}</span>
                         </div>
-                        <div class="tab-pane fade" id="table" role="tabpanel" aria-labelledby="table-tab">
-                            <div class="table-responsive">
-                                <table class="table table-hover">
-                                    <thead>
-                                        <tr>
-                                            <th>Image</th>
-                                            <th>Filename</th>
-                                            <th>Dimensions</th>
-                                            <th>Date Taken</th>
-                                            <th>Has GPS</th>
-                                            <th>Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {% for image in images %}
-                                            <tr>
-                                                <td>
-                                                    <img src="{{ url_for('view_image', filename=image.filename) }}" alt="{{ image.filename }}" class="dashboard-thumbnail">
-                                                </td>
-                                                <td>{{ image.filename }}</td>
-                                                <td>
-                                                    {% if image.metadata %}
-                                                        {{ image.metadata.get('width', 'N/A') }} × {{ image.metadata.get('height', 'N/A') }}
-                                                    {% else %}
-                                                        N/A
-                                                    {% endif %}
-                                                </td>
-                                                <td>
-                                                    {% if image.metadata and image.metadata.get('date_taken') %}
-                                                        {{ image.metadata.date_taken }}
-                                                    {% else %}
-                                                        N/A
-                                                    {% endif %}
-                                                </td>
-                                                <td>
-                                                    {% if image.metadata and image.metadata.get('latitude') and image.metadata.get('longitude') %}
-                                                        <span class="badge bg-success">Yes</span>
-                                                    {% else %}
-                                                        <span class="badge bg-secondary">No</span>
-                                                    {% endif %}
-                                                </td>
-                                                <td>
-                                                    <a href="{{ url_for('image_details', image_id=image._id) }}" class="btn btn-sm btn-outline-primary">
-                                                        Details
-                                                    </a>
-                                                    <form action="{{ url_for('delete_image', image_id=image._id) }}" method="POST" class="d-inline ms-1">
-                                                        <button type="submit" class="btn btn-sm btn-outline-danger" onclick="return confirm('Are you sure you want to delete this image?');">
-                                                            <i class="fas fa-trash-alt"></i>
-                                                        </button>
-                                                    </form>
-                                                </td>
-                                            </tr>
-                                        {% endfor %}
-                                    </tbody>
-                                </table>
+                        <a href="{{ url_for('image_details', image_id=image.id) }}">
+                            {% if image.filename %}
+                            <img src="{{ url_for('view_image', filename=image.filename) }}" 
+                                 class="card-img-top" 
+                                 alt="Uploaded Image Preview"
+                                 style="height: 200px; object-fit: cover;"
+                                 onerror="this.style.display='none'; this.onerror=null;">
+                            {% else %}
+                            <div class="card-img-top d-flex align-items-center justify-content-center bg-light" 
+                                 style="height: 200px;">
+                                <span class="text-muted">Processing...</span>
                             </div>
-                        </div>
-                        <div class="tab-pane fade" id="charts" role="tabpanel" aria-labelledby="charts-tab">
-                            {# Content will be loaded via JavaScript #}
-                            <div id="charts-content-area">
-                                <div class="row">
-                                    <div class="col-md-6 mb-4">
-                                        <div class="card h-100">
-                                            <div class="card-header">Uploads per Day</div>
-                                            <div class="card-body">
-                                                <canvas id="uploadsPerDayChart"></canvas>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="col-md-6 mb-4">
-                                        <div class="card h-100">
-                                            <div class="card-header">Format Distribution</div>
-                                            <div class="card-body d-flex justify-content-center align-items-center">
-                                                <canvas id="formatDistributionChart" style="max-height: 250px;"></canvas>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="row">
-                                    <div class="col-md-6 mb-4">
-                                        <div class="card h-100">
-                                            <div class="card-header">GPS Data Distribution</div>
-                                            <div class="card-body d-flex justify-content-center align-items-center">
-                                                <canvas id="gpsDistributionChart" style="max-height: 250px;"></canvas>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    {% if current_user.is_admin %}
-                                    <div class="col-md-6 mb-4">
-                                        <div class="card h-100">
-                                            <div class="card-header">Images per User</div>
-                                            <div class="card-body">
-                                                 <canvas id="imagesPerUserChart"></canvas>
-                                            </div>
-                                        </div>
-                                    </div>
+                            {% endif %}
+                        </a>
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    {% if image.processing_status == 'completed' %}
+                                        {% if image.prediction_results.get('damage_detected', False) %}
+                                            <span class="badge bg-danger">Damage Detected</span>
+                                            {% if image.confidence_score is not none %}
+                                                <small class="text-muted ms-1">({{ "%.1f"|format(image.confidence_score * 100) }}%)</small>
+                                            {% endif %}
+                                        {% else %}
+                                            <span class="badge bg-success">No Damage</span>
+                                        {% endif %}
+                                    {% elif image.processing_status == 'processing' %}
+                                        <span class="badge bg-warning text-dark">Processing...</span>
+                                    {% elif image.processing_status == 'pending' %}
+                                         <span class="badge bg-secondary">Pending...</span>
+                                    {% elif image.processing_status == 'failed' %}
+                                        <span class="badge bg-dark">Failed</span>
+                                        <small class="text-danger ms-1">{{ image.error_message|truncate(30) }}</small>
+                                    {% else %}
+                                         <span class="badge bg-secondary">{{ image.processing_status|title }}</span>
                                     {% endif %}
                                 </div>
-                                <div class="row">
-                                    <div class="col-md-12 mb-4">
-                                        <div class="card h-100">
-                                            <div class="card-header">Image Counts by Location (Top 20 Clusters)</div>
-                                            <div class="card-body">
-                                                 <canvas id="locationClustersChart"></canvas>
-                                            </div>
-                                        </div>
-                                    </div>
+                                <div class="btn-group">
+                                    <a href="{{ url_for('image_details', image_id=image.id) }}" 
+                                       class="btn btn-sm btn-outline-primary">
+                                        <i class="fas fa-info-circle"></i> Details
+                                    </a>
+                                    <button type="button" 
+                                            class="btn btn-sm btn-outline-danger"
+                                            onclick="confirmDelete('{{ image.id }}', '{{ view }}')">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="tab-pane fade {% if view == 'table' %}show active{% endif %}" id="table-view">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead>
+                        <tr>
+                            <th>Preview</th>
+                            <th>Type</th>
+                            <th>Upload Time</th>
+                            <th>Status</th>
+                            <th>Detection Result</th>
+                            {% if current_user.is_admin %}
+                            <th>User</th>
+                            {% endif %}
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for image in images %}
+                        <tr>
+                            <td>
+                                <a href="{{ url_for('image_details', image_id=image.id) }}">
+                                    {% if image.filename %}
+                                    <img src="{{ url_for('view_image', filename=image.filename) }}" 
+                                         alt="Preview" 
+                                         style="height: 50px; width: 50px; object-fit: cover;"
+                                         onerror="this.style.display='none'; this.onerror=null;">
+                                    {% else %}
+                                    <div class="d-flex align-items-center justify-content-center bg-light" 
+                                         style="height: 50px; width: 50px;">
+                                        <small class="text-muted">Proc...</small>
+                                    </div>
+                                    {% endif %}
+                                </a>
+                            </td>
+                            <td><span class="badge bg-info">{{ image.image_type|title }}</span></td>
+                            <td>{{ image.upload_time.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                            <td>
+                                {% if image.processing_status == 'completed' %}
+                                    <span class="badge bg-success">Complete</span>
+                                {% elif image.processing_status == 'processing' %}
+                                    <span class="badge bg-warning text-dark">Processing...</span>
+                                {% elif image.processing_status == 'pending' %}
+                                     <span class="badge bg-secondary">Pending</span>
+                                {% elif image.processing_status == 'failed' %}
+                                    <span class="badge bg-dark">Failed</span>
+                                {% else %}
+                                    <span class="badge bg-secondary">{{ image.processing_status|title }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if image.processing_status == 'completed' %}
+                                    {% if image.prediction_results.get('damage_detected', False) %}
+                                        {% set damage_type = image.prediction_results.get('raw_predictions', [])[0].label if image.prediction_results.get('raw_predictions') else 'Damage' %}
+                                        <span class="badge bg-danger">
+                                            {{ damage_type|title }}
+                                            {% if image.confidence_score is not none %}
+                                                ({{ "%.1f"|format(image.confidence_score * 100) }}%)
+                                            {% endif %}
+                                        </span>
+                                    {% else %}
+                                        <span class="badge bg-success">No Damage</span>
+                                    {% endif %}
+                                {% elif image.processing_status == 'failed' %}
+                                    <span class="text-danger" title="{{ image.error_message }}">{{ image.error_message|truncate(40) }}</span>
+                                {% else %}
+                                    <span class="text-muted">Waiting...</span>
+                                {% endif %}
+                            </td>
+                            {% if current_user.is_admin %}
+                            <td>{{ image.username }}</td>
+                            {% endif %}
+                            <td>
+                                <div class="btn-group">
+                                    <a href="{{ url_for('image_details', image_id=image.id) }}" 
+                                       class="btn btn-sm btn-outline-primary">
+                                        <i class="fas fa-info-circle"></i> Details
+                                    </a>
+                                    <button type="button" 
+                                            class="btn btn-sm btn-outline-danger"
+                                            onclick="confirmDelete('{{ image.id }}', '{{ view }}')">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
             </div>
         </div>
     </div>
-{% else %}
-    <div class="alert alert-info text-center p-5">
-        <i class="fas fa-info-circle fa-3x mb-3"></i>
-        <h4>No images found</h4>
-        <p>You haven't uploaded any images yet. Get started by uploading your first image.</p>
-        <a href="{{ url_for('upload') }}" class="btn btn-primary mt-2">
-            <i class="fas fa-upload me-1"></i> Upload Image
+    {% else %}
+    <div class="text-center py-5">
+        <div class="mb-4">
+            <i class="fas fa-road fa-4x text-muted"></i>
+        </div>
+        <h4 class="text-muted">No images analyzed yet</h4>
+        <p class="text-muted mb-4">Upload road images to start detecting damage</p>
+        <a href="{{ url_for('upload') }}" class="btn btn-primary">
+            <i class="fas fa-upload"></i> Upload Images
         </a>
     </div>
-{% endif %}
+    {% endif %}
+
+    <div class="alert alert-info">
+        Processing <span id="processingCount">0</span> image(s)...
+        <form action="{{ url_for('delete_stuck_images') }}" method="post" style="display: inline-block; margin-left: 10px;">
+            <input type="hidden" name="view" value="{{ view }}">
+            <button type="submit" class="btn btn-danger btn-sm" id="deleteStuckButton" style="display: none;">
+                Stop & Delete Stuck Images
+            </button>
+        </form>
+    </div>
+</div>
 {% endblock %}
 
-{# Add Bootstrap Modal for Image Preview #}
-<div class="modal fade" id="imagePreviewModal" tabindex="-1" aria-labelledby="imagePreviewModalLabel" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="imagePreviewModalLabel">Image Preview</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body text-center">
-        <img src="" id="modalImage" class="img-fluid" alt="Image Preview">
-      </div>
-    </div>
-  </div>
-</div>
-
 {% block scripts %}
-{{ super() }} {# Include scripts from base.html #}
+{{ super() }}
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    const chartsTab = document.getElementById('charts-tab');
-    const galleryTab = document.getElementById('gallery-tab');
-    const tableTab = document.getElementById('table-tab');
-    const lastActiveTabId = localStorage.getItem('dashboardActiveTabId');
-    
-    let uploadsDayChart, formatChart, gpsChart, userChart, locationChart;
-
-    // --- Chart Colors & Config --- 
-    const primaryColor = 'rgba(13, 110, 253, 0.8)'; // Bootstrap Primary
-    const primaryBorder = 'rgb(13, 110, 253)';
-    const secondaryColor = 'rgba(108, 117, 125, 0.7)'; // Bootstrap Secondary
-    const secondaryBorder = 'rgb(108, 117, 125)';
-    const successColor = 'rgba(25, 135, 84, 0.7)'; // Bootstrap Success
-    const successBorder = 'rgb(25, 135, 84)';
-    const warningColor = 'rgba(255, 193, 7, 0.7)'; // Bootstrap Warning
-    const warningBorder = 'rgb(255, 193, 7)';
-    const dangerColor = 'rgba(220, 53, 69, 0.7)'; // Bootstrap Danger
-    const dangerBorder = 'rgb(220, 53, 69)';
-    const infoColor = 'rgba(13, 202, 240, 0.7)'; // Bootstrap Info
-    const infoBorder = 'rgb(13, 202, 240)';
-    
-    const pieColors = [successColor, warningColor, dangerColor, infoColor, secondaryColor];
-    const barColors = [primaryColor, successColor, warningColor, infoColor, secondaryColor, dangerColor];
-
-    const defaultChartOptions = {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-            legend: {
-                position: 'top',
-            },
-            tooltip: {
-                enabled: true,
-                backgroundColor: 'rgba(0, 0, 0, 0.8)',
-                titleFont: { size: 14 },
-                bodyFont: { size: 12 },
-                padding: 10,
-                cornerRadius: 4,
-                displayColors: true
-            }
-        },
-        // Consider adding default font settings if needed
-        // font: { family: ... }
-    };
-
-    // Function to activate a tab by ID
-    function activateTab(tabId) {
-        if (!tabId) return;
-        const tabElement = document.getElementById(tabId);
-        if (tabElement) {
-            const tab = new bootstrap.Tab(tabElement);
-            tab.show();
-            if (tabId === 'charts-tab') {
-                loadCharts(); // Load charts if activating charts tab
-            }
-        }
-    }
-    
-    // Function to destroy existing charts
-    function destroyCharts() {
-        if (uploadsDayChart) uploadsDayChart.destroy();
-        if (formatChart) formatChart.destroy();
-        if (gpsChart) gpsChart.destroy();
-        if (userChart) userChart.destroy();
-        if (locationChart) locationChart.destroy();
-    }
-
-    // Function to load and render charts
-    function loadCharts() {
-        const chartsArea = document.getElementById('charts-content-area');
-        if (!chartsArea) {
-            console.error("Chart content area not found!");
-            return; // Exit if the main container is missing
-        }
-        
-        // 1. Store the original HTML containing the canvas placeholders
-        const originalChartHTML = chartsArea.innerHTML; 
-        
-        // 2. Destroy existing charts *before* removing canvases from DOM
-        destroyCharts(); 
-
-        // 3. Show a loading indicator 
-        const loadingHtml = '<div class="text-center p-5"><div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div><p class="mt-2 text-muted">Loading chart data...</p></div>';
-        chartsArea.innerHTML = loadingHtml;
-
-        fetch("{{ url_for('charts_data') }}")
-            .then(response => {
-                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                 }
-                 return response.json();
-             })
-            .then(data => {
-                console.log("[DEBUG CHARTS JS] Received data:", data); 
-                
-                // 4. Restore the original HTML structure with canvas elements
-                chartsArea.innerHTML = originalChartHTML; 
-                
-                // 5. Now safely initialize charts using the restored canvas IDs
-                // --- Uploads per Day (Line Chart - Enhanced) ---
-                const uploadsCtx = document.getElementById('uploadsPerDayChart');
-                if (uploadsCtx && data.uploadsPerDay && data.uploadsPerDay.labels && data.uploadsPerDay.labels.length > 0) {
-                    uploadsDayChart = new Chart(uploadsCtx.getContext('2d'), {
-                        type: 'line',
-                        data: {
-                            // labels: data.uploadsPerDay.labels, // We use the parsed date below
-                            datasets: [{
-                                label: 'Images Uploaded',
-                                // Parse dates for time scale
-                                data: data.uploadsPerDay.labels.map((label, index) => ({x: label, y: data.uploadsPerDay.data[index]})),
-                                borderColor: primaryBorder,
-                                backgroundColor: primaryColor,
-                                tension: 0.3, // Smoother curve
-                                pointBackgroundColor: primaryBorder,
-                                pointRadius: 4,
-                                pointHoverRadius: 6,
-                                borderWidth: 2
-                            }]
-                        },
-                        options: {
-                            ...defaultChartOptions, // Apply defaults
-                            scales: {
-                                x: {
-                                    type: 'time',
-                                    time: {
-                                        unit: 'day',
-                                        tooltipFormat: 'MMM dd, yyyy', // Format for tooltip
-                                        displayFormats: {
-                                            day: 'MMM dd' // Format for axis label
-                                        }
-                                    },
-                                    title: {
-                                        display: true,
-                                        text: 'Date'
-                                    }
-                                },
-                                y: {
-                                    beginAtZero: true,
-                                    ticks: { precision: 0 },
-                                    title: {
-                                        display: true,
-                                        text: 'Upload Count'
-                                    }
-                                }
-                            },
-                            plugins: {
-                                ...defaultChartOptions.plugins, // Inherit default plugins
-                                zoom: {
-                                     pan: { enabled: true, mode: 'x' },
-                                     zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' }
-                                }
-                            }
-                        }
-                    });
-                } else { handleEmptyChart('uploadsPerDayChart', 'No upload data available.'); }
-
-                // --- GPS Distribution (Doughnut Chart) ---
-                const gpsCtx = document.getElementById('gpsDistributionChart');
-                 if (gpsCtx && data.gpsDistribution && data.gpsDistribution.data && data.gpsDistribution.data.length > 0 && data.gpsDistribution.data.some(d => d > 0)) {
-                    gpsChart = new Chart(gpsCtx.getContext('2d'), {
-                        type: 'doughnut',
-                        data: {
-                            labels: data.gpsDistribution.labels,
-                            datasets: [{
-                                data: data.gpsDistribution.data,
-                                backgroundColor: pieColors,
-                                hoverOffset: 4
-                            }]
-                        },
-                        options: {
-                            ...defaultChartOptions,
-                            plugins: {
-                                ...defaultChartOptions.plugins,
-                                tooltip: {
-                                     ...defaultChartOptions.plugins.tooltip,
-                                     callbacks: {
-                                         label: function(context) {
-                                             let label = context.label || '';
-                                             if (label) { label += ': '; }
-                                             if (context.parsed !== null) {
-                                                 const total = context.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-                                                 const percentage = total > 0 ? ((context.parsed / total) * 100).toFixed(1) + '%' : '0%';
-                                                 label += context.formattedValue + ' (' + percentage + ')';
-                                             }
-                                             return label;
-                                         }
-                                     }
-                                }
-                            }
-                        }
-                    });
-                } else { handleEmptyChart('gpsDistributionChart', 'No GPS data available.'); }
-
-                // --- Format Distribution (Doughnut Chart) ---
-                 const formatCtx = document.getElementById('formatDistributionChart');
-                if (formatCtx && data.formatDistribution && data.formatDistribution.data && data.formatDistribution.data.length > 0 && data.formatDistribution.data.some(d => d > 0)) {
-                   formatChart = new Chart(formatCtx.getContext('2d'), {
-                        type: 'doughnut',
-                        data: {
-                            labels: data.formatDistribution.labels,
-                            datasets: [{
-                                data: data.formatDistribution.data,
-                                backgroundColor: [primaryColor, dangerColor], // Specific colors
-                                hoverOffset: 4
-                            }]
-                        },
-                        options: { // Similar options to GPS Doughnut
-                            ...defaultChartOptions,
-                             plugins: {
-                                ...defaultChartOptions.plugins,
-                                tooltip: { ...defaultChartOptions.plugins.tooltip, callbacks: { /* Use same percentage callback */
-                                         label: function(context) {
-                                             let label = context.label || '';
-                                             if (label) { label += ': '; }
-                                             if (context.parsed !== null) {
-                                                 const total = context.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-                                                 const percentage = total > 0 ? ((context.parsed / total) * 100).toFixed(1) + '%' : '0%';
-                                                 label += context.formattedValue + ' (' + percentage + ')';
-                                             }
-                                             return label;
-                                         }
-                                     } }
-                            }
-                        }
-                    });
-                } else { handleEmptyChart('formatDistributionChart', 'No format data available.'); }
-                
-                // --- Location Clusters (Bar Chart - Horizontal) ---
-                const locationCtx = document.getElementById('locationClustersChart');
-                 if (locationCtx && data.locationClusters && data.locationClusters.labels && data.locationClusters.labels.length > 0) {
-                     locationChart = new Chart(locationCtx.getContext('2d'), {
-                         type: 'bar',
-                         data: {
-                             labels: data.locationClusters.labels,
-                             datasets: [{
-                                 label: 'Images in Cluster',
-                                 data: data.locationClusters.data,
-                                 backgroundColor: barColors, // Use defined palette
-                                 borderColor: 'rgba(0,0,0,0.1)',
-                                 borderWidth: 1
-                             }]
-                         },
-                         options: {
-                            ...defaultChartOptions,
-                             indexAxis: 'y', // Horizontal bars
-                             scales: {
-                                 x: { // Note: x-axis is now the count
-                                     beginAtZero: true,
-                                     ticks: { precision: 0 },
-                                     title: { display: true, text: 'Image Count' }
-                                 },
-                                 y: { // y-axis is the location label
-                                      title: { display: true, text: 'Location Cluster' }
-                                 }
-                             },
-                             plugins: {
-                                ...defaultChartOptions.plugins,
-                                legend: { display: false } // Hide legend for single dataset bar
-                             }
-                         }
-                     });
-                } else { handleEmptyChart('locationClustersChart', 'No location data found.'); }
-
-                // --- Images per User (Bar Chart - Admin only) ---
-                const userCtx = document.getElementById('imagesPerUserChart'); // This might be null if not admin
-                if (userCtx && data.imagesPerUser && data.imagesPerUser.labels && data.imagesPerUser.labels.length > 0) {
-                     userChart = new Chart(userCtx.getContext('2d'), {
-                         type: 'bar',
-                         data: {
-                             labels: data.imagesPerUser.labels,
-                             datasets: [{
-                                 label: 'Images Uploaded',
-                                 data: data.imagesPerUser.data,
-                                 backgroundColor: barColors,
-                                 borderColor: 'rgba(0,0,0,0.1)',
-                                 borderWidth: 1
-                             }]
-                         },
-                         options: {
-                             ...defaultChartOptions,
-                             scales: {
-                                 y: {
-                                     beginAtZero: true,
-                                     ticks: { precision: 0 },
-                                     title: { display: true, text: 'Image Count' }
-                                 },
-                                 x: {
-                                     title: { display: true, text: 'User' }
-                                 }
-                             },
-                              plugins: {
-                                ...defaultChartOptions.plugins,
-                                legend: { display: false }
-                             }
-                         }
-                     });
-                } else { 
-                    // Only attempt to handle empty if the element exists (admin view)
-                    // No need to call handleEmptyChart if userCtx is null
-                    if (userCtx) { 
-                         handleEmptyChart('imagesPerUserChart', 'No user data available.'); 
-                    }
-                }
-
-            })
-            .catch(error => {
-                console.error('Error fetching or processing chart data:', error);
-                 // Restore original HTML structure even on error, then display message
-                chartsArea.innerHTML = originalChartHTML; 
-                // Optionally add an error message placeholder in your original HTML, 
-                // or dynamically create one here. For simplicity, just log to console
-                // and maybe add a general error to the area if possible.
-                chartsArea.innerHTML = `<div class="alert alert-danger m-3">Could not load chart data. Error: ${error.message}</div>`; 
-            });
-    }
-
-    // Helper function to display message on empty charts
-    function handleEmptyChart(canvasId, message) {
-        const canvas = document.getElementById(canvasId);
-        if (canvas) {
-            const ctx = canvas.getContext('2d');
-            ctx.clearRect(0, 0, canvas.width, canvas.height); 
-            ctx.font = '16px Arial';
-            ctx.fillStyle = 'grey';
-            ctx.textAlign = 'center';
-            ctx.fillText(message, canvas.width/2, 50); // Draw text near top
-        }
-    }
-
-    // Event listeners for tab clicks to save the active tab ID
-    [galleryTab, tableTab, chartsTab].forEach(tab => {
-        if (tab) {
-            tab.addEventListener('shown.bs.tab', function (event) {
-                localStorage.setItem('dashboardActiveTabId', event.target.id);
-                if (event.target.id === 'charts-tab') {
-                    loadCharts();
-                }
-            });
-        }
-    });
-
-    // On page load, activate the last saved tab, or default to gallery
-    if (lastActiveTabId) {
-        activateTab(lastActiveTabId);
-    } else if (galleryTab) {
-        // Default to gallery if nothing is saved
-        const tab = new bootstrap.Tab(galleryTab);
-        tab.show();
-        // No need to explicitly call loadCharts here unless gallery IS the charts tab (which it isn't)
-    }
-    
-    // If the charts tab is already active on load (e.g., browser back button, direct link with hash), load charts.
-    if (document.querySelector('#dashboard-tabs .nav-link.active')?.id === 'charts-tab') {
-        // Check if charts are already loaded (e.g., by activateTab) to avoid double loading
-        // A simple check could be if uploadsDayChart is already defined.
-        if (!uploadsDayChart) {
-            loadCharts();
-        }
-    }
-
-    // --- Image Preview Modal Logic --- 
-    const imagePreviewModal = document.getElementById('imagePreviewModal');
-    const modalImage = document.getElementById('modalImage');
-    const modalTitle = document.getElementById('imagePreviewModalLabel');
-    
-    // Get all gallery image links
-    const galleryImages = document.querySelectorAll('#gallery .card-img-top');
-
-    galleryImages.forEach(img => {
-        // Make image clickable
-        img.style.cursor = 'pointer';
-        img.addEventListener('click', function() {
-            const imageUrl = this.src; // Get the URL of the clicked thumbnail
-            const imageFilename = this.alt; // Get filename from alt text
-
-            // Set the source and title for the modal
-            if (modalImage) {
-                 modalImage.src = imageUrl; 
-            }
-            if (modalTitle) {
-                 modalTitle.textContent = imageFilename;
-            }
-            
-            // Show the modal
-            const modal = new bootstrap.Modal(imagePreviewModal);
-            modal.show();
+    // Store active tab in URL when switching tabs
+    document.querySelectorAll('.nav-link').forEach(tab => {
+        tab.addEventListener('shown.bs.tab', function (e) {
+            const view = e.target.id === 'table-tab' ? 'table' : 'grid';
+            const url = new URL(window.location);
+            url.searchParams.set('view', view);
+            window.history.replaceState({}, '', url);
         });
     });
-});
+
+    function confirmDelete(imageId, view) {
+        if (confirm('Are you sure you want to delete this image?')) {
+            // Create and submit form programmatically
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = `/image/delete/${imageId}`;
+            
+            // Add view parameter
+            const viewInput = document.createElement('input');
+            viewInput.type = 'hidden';
+            viewInput.name = 'view';
+            viewInput.value = view;
+            form.appendChild(viewInput);
+            
+            // Add to document and submit
+            document.body.appendChild(form);
+            form.submit();
+        }
+    }
+
+    function checkProcessingStatus() {
+        fetch('/check_processing_status')
+            .then(response => response.json())
+            .then(data => {
+                const processingCount = data.processing_count || 0;
+                document.getElementById('processingCount').textContent = processingCount;
+                
+                // Show/hide delete button based on processing count
+                const deleteButton = document.getElementById('deleteStuckButton');
+                if (deleteButton) {
+                    deleteButton.style.display = processingCount > 0 ? 'inline-block' : 'none';
+                }
+                
+                if (processingCount > 0) {
+                    setTimeout(checkProcessingStatus, 5000); // Check again in 5 seconds
+                }
+            })
+            .catch(error => console.error('Error:', error));
+    }
+
+    // Start checking when page loads
+    document.addEventListener('DOMContentLoaded', checkProcessingStatus);
 </script>
 {% endblock %} 

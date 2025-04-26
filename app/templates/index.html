@@ -1,51 +1,53 @@
 {% extends "base.html" %}
 
-{% block title %}Image Metadata Extractor - Home{% endblock %}
+{% block title %}Home - RoadAISafety{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center mt-5">
-    <div class="col-md-8 text-center">
-        <h1 class="display-4 mb-4">Image Metadata Extractor</h1>
-        <p class="lead mb-5">Upload your images, extract metadata, and visualize location data on a map.</p>
-        
-        <div class="row g-4 py-4">
-            <div class="col-md-4">
-                <div class="card h-100">
-                    <div class="card-body text-center py-4">
-                        <i class="fas fa-upload fa-3x mb-3 text-primary"></i>
-                        <h5 class="card-title">Upload Images</h5>
-                        <p class="card-text">Upload your images to extract metadata information.</p>
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-10 text-center">
+            <h1 class="display-4 fw-bold mb-3">Welcome to RoadAISafety</h1>
+            <p class="lead text-muted mb-5">Leveraging AI to analyze road conditions and enhance safety through image analysis.</p>
+            
+            <div class="row g-4 py-4">
+                <div class="col-lg-4">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-body text-center py-5">
+                            <i class="fas fa-traffic-light fa-3x mb-3 text-danger"></i>
+                            <h5 class="card-title fw-bold">Hazard Detection</h5>
+                            <p class="card-text text-muted">Upload road images to automatically identify potential hazards like potholes or obstructions.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-body text-center py-5">
+                            <i class="fas fa-map-marker-alt fa-3x mb-3 text-primary"></i>
+                            <h5 class="card-title fw-bold">Location Analysis</h5>
+                            <p class="card-text text-muted">Pinpoint hazard locations using image GPS data and visualize them on a map.</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-lg-4">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-body text-center py-5">
+                            <i class="fas fa-chart-line fa-3x mb-3 text-success"></i>
+                            <h5 class="card-title fw-bold">Safety Reporting</h5>
+                            <p class="card-text text-muted">Generate insights and reports based on detected hazards to inform safety improvements.</p>
+                        </div>
                     </div>
                 </div>
             </div>
-            <div class="col-md-4">
-                <div class="card h-100">
-                    <div class="card-body text-center py-4">
-                        <i class="fas fa-info-circle fa-3x mb-3 text-info"></i>
-                        <h5 class="card-title">Extract Metadata</h5>
-                        <p class="card-text">Analyze image properties, EXIF data, and GPS coordinates.</p>
-                    </div>
-                </div>
+            
+            <div class="mt-5">
+                {% if current_user.is_authenticated %}
+                    <a href="{{ url_for('upload') }}" class="btn btn-primary btn-lg me-2 shadow-sm">Upload Image</a>
+                    <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-lg shadow-sm">Go to Dashboard</a>
+                {% else %}
+                    <a href="{{ url_for('register') }}" class="btn btn-primary btn-lg me-2 shadow-sm">Get Started</a>
+                    <a href="{{ url_for('login') }}" class="btn btn-outline-secondary btn-lg shadow-sm">Login</a>
+                {% endif %}
             </div>
-            <div class="col-md-4">
-                <div class="card h-100">
-                    <div class="card-body text-center py-4">
-                        <i class="fas fa-map-marked-alt fa-3x mb-3 text-success"></i>
-                        <h5 class="card-title">View on Map</h5>
-                        <p class="card-text">See where your photos were taken on an interactive map.</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <div class="mt-5">
-            {% if current_user.is_authenticated %}
-                <a href="{{ url_for('upload') }}" class="btn btn-primary btn-lg me-2">Upload Images</a>
-                <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-lg">Go to Dashboard</a>
-            {% else %}
-                <a href="{{ url_for('register') }}" class="btn btn-primary btn-lg me-2">Get Started</a>
-                <a href="{{ url_for('login') }}" class="btn btn-outline-secondary btn-lg">Login</a>
-            {% endif %}
         </div>
     </div>
 </div>

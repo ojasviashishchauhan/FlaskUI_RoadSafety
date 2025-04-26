@@ -1,12 +1,13 @@
 import os
 import datetime
-from flask import render_template, redirect, url_for, flash, request, send_file, jsonify
+from flask import render_template, redirect, url_for, flash, request, send_file, jsonify, Response, send_from_directory, stream_with_context
 from flask_login import login_user, logout_user, login_required, current_user
 from werkzeug.utils import secure_filename
 from app import app, db
 from app.forms import LoginForm, RegistrationForm, ImageUploadForm
 from app.models import User, Image
-from app.utils import extract_image_metadata, generate_csv_from_metadata, get_location_name
+from app.utils import allowed_file, extract_image_metadata, get_location_name, generate_csv_from_metadata
+from app.ml_predictor import MLPredictor
 import uuid
 import json
 from PIL import Image as PILImage # Import Pillow Image
@@ -19,6 +20,25 @@ from bson import ObjectId # Import ObjectId for matching
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import re # Import regex module
+import requests
+import math
+from threading import Thread
+import time
+from concurrent.futures import ThreadPoolExecutor
+from .chart_utils import ChartDataProcessor
+from app.damage_detector import DamageDetector
+
+# Initialize ML predictor
+models_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'models')
+print(f"\nInitializing MLPredictor with models directory: {models_dir}")
+print(f"Available model files: {os.listdir(models_dir)}")
+ml_predictor = MLPredictor(models_dir)
+
+# Initialize damage detector with ML predictor
+damage_detector = DamageDetector(ml_predictor)
+
+# Thread pool for image processing
+thread_pool = ThreadPoolExecutor(max_workers=4)
 
 @app.route('/')
 def index():
@@ -31,7 +51,8 @@ def login():
     
     form = LoginForm()
     if form.validate_on_submit():
-        user = User.get_by_username(form.username.data)
+        # Find user by username using MongoEngine
+        user = User.objects(username=form.username.data).first()
         if user and user.check_password(form.password.data):
             login_user(user)
             next_page = request.args.get('next')
@@ -55,64 +76,208 @@ def register():
     
     form = RegistrationForm()
     if form.validate_on_submit():
-        user = User(
-            username=form.username.data,
-            email=form.email.data,
-            password=form.password.data,
-            is_admin=False
-        )
-        user.save()
-        flash('Your account has been created! You can now log in.', 'success')
-        return redirect(url_for('login'))
-    
+        try:
+            # Create new user instance using MongoEngine
+            user = User(
+                username=form.username.data,
+                email=form.email.data
+            )
+            user.set_password(form.password.data) # Hash the password
+            user.save() # Save the new user document
+            flash('Your account has been created! You can now log in.', 'success')
+            return redirect(url_for('login'))
+        except Exception as e:
+            # Handle potential errors like duplicate username/email
+            flash(f'Registration failed: {e}', 'danger') 
+            
     return render_template('register.html', form=form)
 
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    # Get search term
-    search_term = request.args.get('search', '').strip()
+    # Get view preference and search term
+    view = request.args.get('view', 'grid')
+    search_term = request.args.get('search', '')
     
-    # Base query
+    # Build query using MongoEngine
     query = {}
-    
-    # Filter by user if not admin
     if not current_user.is_admin:
-        user_id_str = current_user.get_id()
-        try:
-            user_id_obj = ObjectId(user_id_str)
-            query['$or'] = [
-                {'user_id': user_id_str},
-                {'user_id': user_id_obj}
-            ]
-        except Exception:
-             # Fallback for invalid ID - query only string
-             query['user_id'] = user_id_str
-
+        # Use the user's actual ObjectId from the User document
+        query['user_id'] = current_user.id 
+    
     # Add filename search condition if term exists
     if search_term:
-        # Use regex for case-insensitive partial match
-        # Need to escape regex special characters in the search term
-        escaped_term = re.escape(search_term)
-        regex_query = {'$regex': escaped_term, '$options': 'i'}
+        query['filename__icontains'] = search_term
+    
+    # Fetch image documents using MongoEngine
+    # Use .select_related() for potential optimization if fetching user info often
+    images_qs = Image.objects(**query).order_by('-upload_time')
+    
+    # Prepare images list, potentially adding username for admin view
+    images_list = list(images_qs) # Execute the query
+    if current_user.is_admin:
+        # Fetch usernames efficiently
+        user_ids = [img.user_id for img in images_list]
+        users = User.objects(id__in=user_ids).only('id', 'username')
+        user_map = {str(user.id): user.username for user in users}
         
-        # If query already has user filter ($or), add search to it
-        if '$or' in query:
-            # Add search term condition to BOTH parts of the $or for user filter
-            query['$and'] = [
-                {'$or': query.pop('$or')}, # Keep existing user filter
-                {'filename': regex_query}  # Add filename filter
-            ]
-        else:
-            # If only searching all images (admin) or failed user ID
-            query['filename'] = regex_query
+        # Add username to each image object (as a temporary attribute for the template)
+        for img in images_list:
+            img.username = user_map.get(str(img.user_id), 'Unknown User')
             
-    print(f"[DEBUG DASHBOARD] Final Query: {query}") # DEBUG
+    # Pass the list of Image DOCUMENTS to the template
+    return render_template('dashboard.html', 
+                         images=images_list, 
+                         is_admin=current_user.is_admin,
+                         view=view)
 
-    # Fetch images based on final query
-    user_images = list(db.images.find(query).sort('upload_time', -1))
+def process_image_async(file_data, image_id, image_type_from_form):
+    """Process image asynchronously using image_id"""
+    # Get original filename for logging if needed (optional)
+    try:
+        temp_image = Image.objects(id=image_id).only('original_filename').first()
+        original_filename_for_log = temp_image.original_filename if temp_image else str(image_id)
+    except Exception:
+        original_filename_for_log = str(image_id)
+
+    # --- LOGGING: Task Start --- 
+    print(f"[PID:{os.getpid()}] process_image_async starting for: ID {image_id} (Orig: {original_filename_for_log})") 
+    image = None  # Initialize image to None
+    try:
+        # Find the specific image entry by ID
+        image = Image.objects(id=image_id).first()
+        if not image:
+             print(f"Error: Could not find image entry for ID {image_id}")
+             return # Exit if no entry found
+
+        # Generate unique filename (if not already set, though it likely is)
+        if not image.filename or not image.file_path:
+            unique_filename_part = uuid.uuid4().hex
+            filename_ext = os.path.splitext(image.original_filename)[1] if image.original_filename else '.png'
+            image.filename = f"{unique_filename_part}{filename_ext}"
+            image.file_path = os.path.join(app.config['UPLOAD_FOLDER'], image.filename)
+            print(f"Generated filename {image.filename} for ID {image_id}")
+
+        # Save the actual image file data
+        print(f"Saving image file to {image.file_path}")
+        with open(image.file_path, 'wb') as f:
+            f.write(file_data)
+        print(f"Image file saved for ID {image_id}")
         
-    return render_template('dashboard.html', images=user_images)
+        # --- Extract and Save Metadata/Location --- 
+        print(f"Extracting metadata for {image.filename} (ID: {image.id})")
+        metadata = extract_image_metadata(image.file_path)
+        location = {}
+        # Check for lat/lon in the primary metadata structure
+        lat = metadata.get('latitude')
+        lon = metadata.get('longitude')
+        if lat is not None and lon is not None:
+            location['latitude'] = lat
+            location['longitude'] = lon
+            # Attempt to get location name (address)
+            try:
+                location['address'] = get_location_name(lat, lon)
+            except Exception as loc_err:
+                 print(f"Error getting location name for ID {image.id}: {loc_err}")
+                 location['address'] = "Address lookup failed"
+        print(f"Assigning Metadata: {metadata} for ID {image.id}")
+        print(f"Assigning Location: {location} for ID {image.id}")
+        image.metadata = metadata
+        image.location = location
+        # --- End Metadata/Location Extraction --- 
+
+        # Update status to processing 
+        image.processing_status = 'processing'
+        image.image_type = image_type_from_form 
+        print(f"Saving initial state (processing + meta/loc) for ID {image.id}")
+        image.save() 
+        print(f"Initial state saved for ID {image.id}")
+        
+        # Run ML prediction
+        print(f"Starting ML prediction for {image.filename} (ID: {image.id})")
+        prediction = ml_predictor.predict(image.file_path, image.image_type)
+        print(f"ML prediction completed for {image.filename} (ID: {image.id})")
+        
+        # --- Remove RADICAL SIMPLIFICATION TEST ---
+        # (Code block removed)
+        # --- END RADICAL SIMPLIFICATION TEST ---
+
+        # --- Restore Original result processing ---
+        image_to_update = Image.objects(id=image.id).first() # Fetch fresh object just before final update
+        if not image_to_update:
+             print(f"ERROR: Could not find image {image.filename} (ID: {image.id}) for final save.")
+             # Consider how to handle this - maybe mark original image object as failed?
+             # image.processing_status = 'failed' 
+             # image.error_message = 'Failed to refetch document before final save'
+             # image.save()
+             return # Exit processing
+
+        image_to_update.processing_status = 'completed'
+        image_to_update.completion_time = datetime.datetime.now()
+        
+        # Log confidence score before assigning
+        raw_preds = prediction.get('raw_predictions', [])
+        # Calculate confidence score (e.g., average or max of detections)
+        if raw_preds:
+             # Example: Use max confidence among detections
+             conf_score = max(p.get('confidence', 0.0) for p in raw_preds)
+        else:
+             conf_score = 0.0
+        print(f"Assigning confidence_score: {conf_score} (Type: {type(conf_score)}) for {image.filename}")
+        image_to_update.confidence_score = conf_score 
+        
+        # Prepare prediction results dict (store full results again)
+        annotated_path = prediction.get('annotated_path')
+        pred_results_dict = {
+            'damage_detected': bool(raw_preds),
+            'raw_predictions': raw_preds, # Include raw predictions again
+            'annotated_path': annotated_path
+        }
+        # Log the prediction results dict before assigning
+        print(f"Assigning prediction_results: {pred_results_dict} for {image.filename}") 
+        image_to_update.prediction_results = pred_results_dict
+        
+        # Extract processing time if available in prediction results
+        # Assuming processing_time might be added to the prediction dict by MLPredictor
+        # if 'processing_time' in prediction:
+        #      image_to_update.processing_time = prediction['processing_time']
+        # Or maybe calculate total time here if not passed back:
+        # image_to_update.processing_time = time.time() - start_time_of_processing
+        
+        image_to_update.annotated_image_path = annotated_path # Save annotated path
+        
+        print(f"Attempting to save final FULL results for {image.filename} (ID: {image.id})...")
+        try:
+            image_to_update.save()
+            print(f"Successfully saved final FULL results for {image.filename} (ID: {image.id})")
+        except Exception as final_save_err:
+            print(f"ERROR saving final FULL results for {image.filename} (ID: {image.id}): {final_save_err}")
+            # Log traceback for detailed error
+            import traceback
+            traceback.print_exc() 
+            # Update status to failed if save fails
+            try:
+                image_to_update.processing_status = 'failed'
+                image_to_update.error_message = f"Failed to save results: {final_save_err}"
+                image_to_update.save()
+                print(f"Updated image ID {image.id} status to failed after save error.")
+            except Exception as update_err:
+                print(f"Error updating status to failed for ID {image.id} after save error: {update_err}")
+        # --- End original result processing ---
+            
+    except Exception as e:
+        print(f"Error in process_image_async for ID {image_id} (Orig: {original_filename_for_log}): {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # Update database with error status if image object exists
+        if image: # Use the image object fetched at the start
+            try:
+                image.processing_status = 'failed'
+                image.error_message = str(e)
+                image.save()
+                print(f"Updated image ID {image_id} status to failed.")
+            except Exception as update_err:
+                print(f"Error updating error status for ID {image_id}: {update_err}")
 
 @app.route('/upload', methods=['GET', 'POST'])
 @login_required
@@ -122,429 +287,640 @@ def upload():
         uploaded_count = 0
         failed_count = 0
         
-        # Loop through all uploaded files
-        for image_file in form.images.data:
+        for uploaded_file in form.images.data:
+            original_filename = secure_filename(uploaded_file.filename)
+            current_user_id_str = current_user.get_id() # Get user ID once
             try:
-                original_filename = secure_filename(image_file.filename)
-                file_ext = os.path.splitext(original_filename)[1].lower()
-                unique_base = uuid.uuid4().hex
-
-                # Ensure upload directory exists (redundant inside loop, but safe)
-                os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-                filename_to_store = f"{unique_base}{file_ext}"
-                final_file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename_to_store)
-                metadata_source_path = final_file_path # Default: extract from final file
-
-                # Handle HEIC conversion
-                if file_ext in ['.heic', '.heif']:
-                    # Save HEIC temporarily for conversion
-                    temp_heic_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{unique_base}_temp{file_ext}")
-                    jpeg_filename = f"{unique_base}.jpg"
-                    final_file_path = os.path.join(app.config['UPLOAD_FOLDER'], jpeg_filename) # Final path is JPEG
-                    filename_to_store = jpeg_filename # Store JPEG name in DB
-                    
-                    # Wrap HEIC processing in its own try block
-                    try:
-                        image_file.save(temp_heic_path)
-                        
-                        # Convert HEIC to JPEG using sips FIRST
-                        sips_cmd = ["sips", "-s", "format", "jpeg", temp_heic_path, "--out", final_file_path]
-                        result = subprocess.run(sips_cmd, capture_output=True, text=True, check=True) # Add check=True
-                        
-                        print(f"[INFO] Successfully converted HEIC to JPEG using sips: {final_file_path}")
-                        metadata_source_path = final_file_path # Set metadata source to the NEW JPEG file
-                        os.remove(temp_heic_path) # Clean up temporary HEIC *after* conversion
-                        
-                    except (subprocess.CalledProcessError, Exception) as heic_err:
-                        # Handle HEIC specific errors (conversion failed)
-                        flash(f'Error processing HEIC file {original_filename}: {heic_err}. Skipping this file.', 'danger')
-                        if os.path.exists(temp_heic_path):
-                            try: os.remove(temp_heic_path)
-                            except OSError: pass
-                        failed_count += 1
-                        continue # Skip to the next file
-                else:
-                    # For non-HEIC files, save directly to the final path
-                    image_file.save(final_file_path)
-                    metadata_source_path = final_file_path # Extract from the original file
-
-                # *** Extract metadata (now always from a JPEG or other Pillow-compatible file) ***
-                print(f"[DEBUG UPLOAD] Extracting metadata from: {metadata_source_path}") # DEBUG
-                metadata = extract_image_metadata(metadata_source_path)
-                print(f"[DEBUG UPLOAD] Extracted metadata: {metadata}") # DEBUG
+                # Handle image upload
+                file_data = uploaded_file.read()
                 
-                # *** Perform Reverse Geocoding and add to metadata ***
-                if metadata and not metadata.get('error') and metadata.get('latitude') and metadata.get('longitude'):
-                    location_name = get_location_name(metadata.get('latitude'), metadata.get('longitude'))
-                    if location_name:
-                        metadata['location_name'] = location_name
-                        print(f"[DEBUG UPLOAD] Added location_name: {location_name}") # DEBUG
-                    else:
-                        print("[DEBUG UPLOAD] Geocoding did not return a location name.") # DEBUG
+                # Create initial database entry using MongoEngine
+                initial_entry = Image(
+                    original_filename=original_filename, 
+                    user_id=ObjectId(current_user_id_str),
+                    upload_time=datetime.datetime.now(),
+                    image_type=form.image_type.data,
+                    processing_status='pending' 
+                )
+                initial_entry.save()
+                print(f"Created initial DB entry for {original_filename} with ID: {initial_entry.id}")
                 
-                # Save image info to database
-                if metadata is not None: # Check if metadata extraction failed
-                    image_db_entry = Image(
-                        filename=filename_to_store, # Use final filename (original or converted)
-                        user_id=current_user.get_id(),
-                        metadata=metadata,
-                        upload_time=datetime.datetime.now()
-                    )
-                    image_db_entry.save()
-                    uploaded_count += 1
+                # Submit to thread pool OR run synchronously for Potholes
+                if form.image_type.data == 'Potholes':
+                    print(f"--- Running Potholes processing SYNCHRONOUSLY for {original_filename} ---")
+                    process_image_async(file_data, initial_entry.id, form.image_type.data)
+                    print(f"--- SYNCHRONOUS Potholes processing finished for {original_filename} ---")
                 else:
-                    flash(f'Failed to extract metadata for {original_filename}. Skipping database save.', 'warning')
-                    failed_count += 1
-                    # Optionally: delete the saved file if metadata extraction failed?
-                    # if os.path.exists(final_file_path):
-                    #     try: os.remove(final_file_path)
-                    #     except OSError: pass 
-
-            except Exception as general_err:
-                 # Catch any unexpected errors during the processing of a single file
-                 flash(f'An unexpected error occurred processing file {original_filename}: {general_err}. Skipping this file.', 'danger')
-                 failed_count += 1
-                 continue # Skip to next file
+                    future = thread_pool.submit(process_image_async, file_data, initial_entry.id, form.image_type.data)
+                    # --- LOGGING: Task Submission ---
+                    print(f"[PID:{os.getpid()}] Submitted ASYNC task for {original_filename} (User: {current_user_id_str}). Future running: {future.running()}") 
+                uploaded_count += 1
+                
+            except Exception as e:
+                failed_count += 1
+                print(f"Failed to initiate processing for {original_filename}: {str(e)}")
+                import traceback
+                traceback.print_exc()
         
-        # Flash summary message after processing all files
         if uploaded_count > 0:
-             flash(f'{uploaded_count} image(s) uploaded successfully.', 'success')
+            flash(f'{uploaded_count} file(s) uploaded and queued for processing.', 'success')
         if failed_count > 0:
-             flash(f'{failed_count} image(s) failed to upload or process.', 'danger')
+            flash(f'{failed_count} file(s) failed to upload.', 'danger')
              
         return redirect(url_for('dashboard'))
     
     return render_template('upload.html', form=form)
 
+def is_video_file(filename):
+    """Check if a file is a video based on its extension"""
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv'}
+    return os.path.splitext(filename)[1].lower() in video_extensions
+
+@app.route('/check_processing_status')
+@login_required
+def check_processing_status():
+    try:
+        # Get all processing images for the current user using MongoEngine
+        processing_images = Image.objects(
+            user_id=ObjectId(current_user.get_id()), 
+            processing_status__in=['pending', 'processing']
+        )
+        
+        status_list = [
+            {
+                'id': str(img.id),
+                'original_filename': img.original_filename,
+                'status': img.processing_status,
+                'progress': 50 if img.processing_status == 'processing' else 0 # Simple progress indication
+            } for img in processing_images
+        ]
+        
+        return jsonify({'images': status_list})
+    except Exception as e:
+        print(f"Error checking processing status: {e}")
+        return jsonify({'error': 'Failed to check status'}), 500
+
 @app.route('/image/<image_id>')
 @login_required
 def image_details(image_id):
-    image_data = Image.get_by_id(image_id)
-    
-    if not image_data or str(image_data['user_id']) != current_user.get_id():
-        flash('Image not found or you do not have permission to view it.', 'danger')
+    try:
+        # Fetch image document using MongoEngine
+        image = Image.objects(id=ObjectId(image_id)).first()
+
+        if not image:
+            flash('Image not found', 'error')
+            return redirect(url_for('dashboard'))
+
+        # Check if user has permission to view this image
+        if image.user_id != current_user.id and not current_user.is_admin:
+            flash('You do not have permission to view this image', 'error')
+            return redirect(url_for('dashboard'))
+
+        # Pass the raw Image DOCUMENT to the template
+        return render_template('image_details.html', image=image)
+
+    except Exception as e:
+        flash(f'Error retrieving image details: {str(e)}', 'error')
+        import traceback
+        traceback.print_exc()
         return redirect(url_for('dashboard'))
-    
-    return render_template('image_details.html', image=image_data)
 
 @app.route('/image/delete/<image_id>', methods=['POST'])
 @login_required
 def delete_image(image_id):
-    image_data = Image.get_by_id(image_id)
+    try:
+        # Find the image document using MongoEngine
+        image = Image.objects(id=ObjectId(image_id)).first()
 
-    # Verify image exists and belongs to the current user
-    if not image_data or str(image_data['user_id']) != current_user.get_id():
-        flash('Image not found or you do not have permission to delete it.', 'danger')
+        if not image:
+            flash('Image not found.', 'danger')
+            return redirect(url_for('dashboard'))
+
+        # Check permissions
+        if image.user_id != current_user.id and not current_user.is_admin:
+            flash('You do not have permission to delete this image.', 'danger')
+            return redirect(url_for('dashboard'))
+
+        # Attempt to delete associated files (original and annotated)
+        files_to_delete = []
+        if image.file_path and os.path.exists(image.file_path):
+            files_to_delete.append(image.file_path)
+        if image.annotated_image_path and os.path.exists(image.annotated_image_path):
+             files_to_delete.append(image.annotated_image_path)
+
+        deleted_files = True
+        for file_path in files_to_delete:
+            try:
+                os.remove(file_path)
+                print(f"Deleted file: {file_path}")
+            except OSError as e:
+                print(f"Error deleting file {file_path}: {e}")
+                flash(f'Error deleting associated file {os.path.basename(file_path)}.', 'warning')
+                deleted_files = False # Mark as partial success if file deletion fails
+
+        # Delete the document from the database using MongoEngine
+        image.delete()
+        print(f"Deleted image document with ID: {image_id}")
+
+        flash('Image deleted successfully.' if deleted_files else 'Image record deleted, but failed to remove some associated files.', 'success' if deleted_files else 'warning')
         return redirect(url_for('dashboard'))
 
-    # Attempt to delete the image file
-    filename = image_data['filename']
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    file_deleted = False
-    try:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            file_deleted = True
-        else:
-            # If file doesn't exist, still proceed to delete DB record
-            file_deleted = True 
-            flash(f'Image file {filename} not found, but removing database record.', 'warning')
-    except OSError as e:
-        flash(f'Error deleting image file: {e}', 'danger')
-        # Optionally, decide if you want to proceed with DB deletion even if file deletion fails
-        # return redirect(url_for('dashboard')) 
-
-    # Attempt to delete the database record
-    db_deleted = Image.delete_by_id(image_id)
-
-    if db_deleted and file_deleted:
-        flash('Image deleted successfully.', 'success')
-    elif db_deleted and not file_deleted:
-         # This case might happen if the file deletion failed but DB deletion succeeded
-        flash('Image record deleted from database, but failed to delete the file.', 'warning')
-    elif not db_deleted:
-        flash('Failed to delete image record from the database.', 'danger')
-        # Consider if you need to restore the file if it was deleted but DB op failed
-
-    return redirect(url_for('dashboard'))
+    except Exception as e:
+        print(f"Error deleting image {image_id}: {e}")
+        flash('An error occurred while deleting the image.', 'danger')
+        import traceback
+        traceback.print_exc()
+        return redirect(url_for('dashboard'))
 
 @app.route('/image/view/<filename>')
-@login_required
 def view_image(filename):
-    # TODO: Add security check to verify user has access to this image
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-    return send_file(file_path)
+    if not filename:
+        return "No filename specified", 400
+    try:
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    except Exception as e:
+        return f"Error retrieving image: {str(e)}", 404
+
+@app.route('/image/view_annotated/<filename>')
+def view_annotated_image(filename):
+    if not filename:
+        return "No filename specified", 400
+    try:
+        # Check if the filename contains "_annotated"
+        if "_annotated" not in filename:
+            filename = filename.rsplit('.', 1)
+            filename = f"{filename[0]}_annotated.{filename[1]}"
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    except Exception as e:
+        return f"Error retrieving annotated image: {str(e)}", 404
 
 @app.route('/export/csv')
 @login_required
 def export_csv():
-    if current_user.is_admin:
-        user_images = list(db.images.find())
-        export_filename = f"all_metadata_export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    else:
-        user_images = Image.get_by_user_id(current_user.get_id())
-        export_filename = f"metadata_export_{current_user.get_id()}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    
-    # Extract metadata from each image
-    metadata_list = [img.get('metadata', {}) for img in user_images]
-    
-    # Generate CSV file
-    csv_path = os.path.join(
-        app.config['UPLOAD_FOLDER'], 
-        export_filename
-    )
-    
-    file_path = generate_csv_from_metadata(metadata_list, csv_path)
-    
-    return send_file(file_path, as_attachment=True)
+    try:
+        # Build the base query using MongoEngine
+        query_filters = {}
+        if not current_user.is_admin:
+            query_filters['user_id'] = ObjectId(current_user.get_id())
+        
+        # Fetch images using MongoEngine
+        image_docs = Image.objects(**query_filters).order_by('-upload_time')
+
+        # Convert documents to list of dictionaries
+        images_data = [img.to_dict() for img in image_docs]
+        
+        # Add username if admin
+        if current_user.is_admin:
+            user_map = {str(user.id): user.username for user in User.objects(id__in=[img['user_id'] for img in images_data])}
+            for img_data in images_data:
+                img_data['username'] = user_map.get(img_data.get('user_id'), 'Unknown')
+
+        # Define fields for CSV
+        fields = [
+            'id', 'username', 'original_filename', 'upload_time', 'processing_status',
+            'image_type', 'confidence_score', 'processing_time', 'error_message',
+            'metadata', 'location', 'prediction_results' # Include complex fields
+        ]
+
+        # Generate CSV content
+        csv_content = generate_csv_from_metadata(images_data, fields)
+
+        # Create response
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return Response(
+            csv_content,
+            mimetype="text/csv",
+            headers={"Content-disposition": f"attachment; filename=image_export_{timestamp}.csv"}
+        )
+
+    except Exception as e:
+        flash(f'Error exporting data: {str(e)}', 'error')
+        import traceback
+        traceback.print_exc()
+        return redirect(url_for('dashboard'))
 
 @app.route('/map')
 @login_required
 def map_view():
-    if current_user.is_admin:
-        user_images = list(db.images.find())
-    else:
-        user_images = Image.get_by_user_id(current_user.get_id())
-    
-    # Filter images that have GPS coordinates
-    geo_images = []
-    for img in user_images:
-        metadata = img.get('metadata', {})
-        if 'latitude' in metadata and 'longitude' in metadata:
-            geo_images.append({
-                'id': str(img['_id']),
-                'filename': img['filename'],
-                'latitude': metadata['latitude'],
-                'longitude': metadata['longitude'],
-                'thumbnail': url_for('view_image', filename=img['filename'])
-            })
-    
-    return render_template('map.html', geo_images=json.dumps(geo_images))
-
-@app.route('/charts_data')
-@login_required
-def charts_data():
-    """Endpoint to provide aggregated data for charts using efficient database queries."""
-    print("[DEBUG CHARTS] /charts_data endpoint hit (Optimized Version)")
-
-    # --- Determine Match Query based on User Role ---
-    match_query = {}
-    user_id_str = current_user.get_id()
-    is_admin = current_user.is_admin
-
-    if not is_admin:
-        print(f"[DEBUG CHARTS] User is NOT admin. User ID (str): {user_id_str}")
-        try:
-            # Convert string ID to ObjectId for reliable matching
-            user_id_obj = ObjectId(user_id_str)
-            print(f"[DEBUG CHARTS] User ID (ObjectId): {user_id_obj}")
-            match_query = {
-                '$match': { 'user_id': user_id_obj } # Match directly on ObjectId
-            }
-            print(f"[DEBUG CHARTS] Constructed non-admin match query: {match_query}")
-        except Exception as e:
-             print(f"[WARN CHARTS] Invalid ObjectId format for user {user_id_str}. Error: {e}. Cannot generate user-specific charts.")
-             # Return empty data structure if ID is invalid
-             return jsonify({
-                 'uploadsPerDay': {'labels': [], 'data': []},
-                 'gpsDistribution': {'labels': [], 'data': []},
-                 'formatDistribution': {'labels': [], 'data': []},
-                 'locationClusters': {'labels': [], 'data': []},
-                 'imagesPerUser': None # Keep consistent structure
-             })
-    else:
-        print("[DEBUG CHARTS] User IS admin. Initial query will include all images.")
-        match_query = {'$match': {}} # Start with an empty match for admin to include all
-
-    # --- Define Aggregation Pipelines ---
-
-    # Pipeline to get daily counts, GPS status, and format
-    daily_and_format_pipeline = [match_query] # Start with user filter if needed
-    daily_and_format_pipeline.extend([
-        {
-            '$project': {
-                '_id': 0, # Exclude the default _id
-                'upload_date_only': {'$dateToString': {'format': '%Y-%m-%d', 'date': '$upload_time'}},
-                'has_gps': {
-                    '$cond': [
-                        {'$and': [
-                            {'$ne': ['$metadata.latitude', None]},
-                            {'$ne': ['$metadata.longitude', None]},
-                            {'$ne': ['$metadata.latitude', '']}, # Handle empty strings if they occur
-                            {'$ne': ['$metadata.longitude', '']}
-                        ]},
-                        True, False
-                    ]
-                },
-                'file_format': {
-                    '$ifNull': ['$metadata.format', 'Unknown'] # Use stored format, default if missing
-                }
-            }
-        },
-        {
-            '$group': {
-                '_id': '$upload_date_only', # Group by date string
-                'total_uploads': {'$sum': 1},
-                'gps_count': {'$sum': {'$cond': ['$has_gps', 1, 0]}},
-                # Count formats directly
-                'formats': {'$push': '$file_format'}
-            }
-        },
-        {
-            '$sort': {'_id': 1} # Sort by date ascending
-        }
-    ])
-    print(f"[DEBUG CHARTS] Daily & Format Pipeline: {daily_and_format_pipeline}")
-
-    # Pipeline for Location Clusters (using stored location_name)
-    location_pipeline = [match_query] # Start with user filter
-    location_pipeline.extend([
-        {
-            '$match': { # Only include images with a valid location name
-                'metadata.location_name': {'$exists': True, '$ne': None, '$ne': ''}
-            }
-        },
-        {
-            '$group': {
-                '_id': '$metadata.location_name', # Group by the stored location name
-                'count': {'$sum': 1}
-            }
-        },
-        {'$sort': {'count': -1}}, # Sort by count descending
-        {'$limit': 20} # Limit to top 20 locations
-    ])
-    print(f"[DEBUG CHARTS] Location Pipeline: {location_pipeline}")
-
-    # Pipeline for Images per User (Admin only)
-    admin_user_pipeline = []
-    if is_admin:
-        admin_user_pipeline.extend([
-            # No initial match needed here, matches all users
-            {
-                '$group': {
-                    '_id': '$user_id', # Group by user_id stored in image doc
-                    'image_count': {'$sum': 1}
-                }
-            },
-            { # Join with the users collection to get usernames
-                '$lookup': {
-                    'from': 'users', # The name of the users collection
-                    'localField': '_id', # The user_id from the images collection
-                    'foreignField': '_id', # The _id from the users collection
-                    'as': 'user_info'
-                }
-            },
-            { # Deconstruct the user_info array (should only be one match)
-                '$unwind': {
-                    'path': '$user_info',
-                    'preserveNullAndEmptyArrays': True # Keep users even if not found in users collection
-                }
-            },
-            { # Shape the output
-                '$project': {
-                    '_id': 0, # Exclude the default _id
-                    'username': {
-                        '$ifNull': ['$user_info.username', {'$concat': ['Unknown User (ID: ', {'$toString': '$_id'}, ')']}]
-                    },
-                    'image_count': 1
-                }
-            },
-            {'$sort': {'image_count': -1}} # Sort by image count descending
-        ])
-        print(f"[DEBUG CHARTS] Admin User Pipeline: {admin_user_pipeline}")
-
-    # --- Execute Aggregations ---
     try:
-        print("[DEBUG CHARTS] Executing daily/format pipeline...")
-        daily_format_results = list(db.images.aggregate(daily_and_format_pipeline))
-        print(f"[DEBUG CHARTS] Daily/Format results count: {len(daily_format_results)}")
+        # Build base query using MongoEngine
+        query_filters = {
+            'processing_status': 'completed',
+            'location__exists': True, # Ensure location field exists
+            'location.latitude__exists': True, # Ensure latitude exists
+            'location.longitude__exists': True # Ensure longitude exists
+        }
+        if not current_user.is_admin:
+            query_filters['user_id'] = current_user.id
 
-        print("[DEBUG CHARTS] Executing location pipeline...")
-        location_results = list(db.images.aggregate(location_pipeline))
-        print(f"[DEBUG CHARTS] Location results count: {len(location_results)}")
+        # Fetch images with location data using MongoEngine
+        # Select only necessary fields for performance
+        images_with_location = Image.objects(**query_filters).only(
+            'id', 'filename', 'original_filename', 'location', 
+            'prediction_results', 'confidence_score' 
+        )
 
-        admin_user_results = []
-        if is_admin:
-            print("[DEBUG CHARTS] Executing admin user pipeline...")
-            admin_user_results = list(db.images.aggregate(admin_user_pipeline))
-            print(f"[DEBUG CHARTS] Admin user results count: {len(admin_user_results)}")
+        # Prepare data for the map
+        map_data = []
+        for img in images_with_location:
+            # Double-check location data structure and validity
+            loc = img.location
+            if isinstance(loc, dict) and \
+               isinstance(loc.get('latitude'), (int, float)) and \
+               isinstance(loc.get('longitude'), (int, float)):
+                
+                damage_detected = img.prediction_results.get('damage_detected', False)
+                confidence = img.confidence_score if damage_detected else None
+                
+                map_data.append({
+                    'id': str(img.id),
+                    'lat': loc['latitude'],
+                    'lon': loc['longitude'],
+                    'filename': img.original_filename or img.filename, # Use original if available
+                    'damage': damage_detected,
+                    'confidence': confidence,
+                    'details_url': url_for('image_details', image_id=str(img.id))
+                })
+            else:
+                print(f"Skipping image {img.id} due to invalid/missing location data: {loc}")
 
-    except Exception as agg_error:
-        print(f"[ERROR CHARTS] Aggregation failed: {agg_error}")
-        # Return empty structure on error
-        return jsonify({
-            'uploadsPerDay': {'labels': [], 'data': []},
-            'gpsDistribution': {'labels': [], 'data': []},
-            'formatDistribution': {'labels': [], 'data': []},
-            'locationClusters': {'labels': [], 'data': []},
-            'imagesPerUser': {'labels': [], 'data': []} if is_admin else None
-        })
+        return render_template('map_view.html', map_data=json.dumps(map_data))
+    except Exception as e:
+        flash(f'Error loading map view: {str(e)}', 'danger')
+        import traceback
+        traceback.print_exc()
+        return redirect(url_for('dashboard'))
 
-    # --- Process Results ---
+@app.route('/bhuvan-proxy/<path:tile_path>')
+def bhuvan_proxy(tile_path):
+    try:
+        z, x, y = tile_path.replace('.png', '').split('/')
+        
+        # Calculate bounding box for the tile
+        n = 2.0 ** float(z)
+        lon1 = float(x) / n * 360.0 - 180.0
+        lat1 = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * float(y) / n))))
+        lon2 = float(x + 1) / n * 360.0 - 180.0
+        lat2 = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * (float(y) + 1) / n))))
+        
+        bbox = f"{lon1},{lat1},{lon2},{lat2}"
+        
+        # Use Bhuvan's WMS service
+        bhuvan_url = "https://bhuvan-vec1.nrsc.gov.in/bhuvan/wms"
+        params = {
+            'SERVICE': 'WMS',
+            'VERSION': '1.1.1',
+            'REQUEST': 'GetMap',
+            'LAYERS': 'india3',
+            'STYLES': '',
+            'FORMAT': 'image/png',
+            'TRANSPARENT': 'true',
+            'HEIGHT': '256',
+            'WIDTH': '256',
+            'SRS': 'EPSG:4326',
+            'BBOX': bbox
+        }
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:137.0) Gecko/20100101 Firefox/137.0',
+            'Accept': 'image/avif,image/webp,image/png,image/svg+xml,image/*;q=0.8,*/*;q=0.5',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': 'https://bhuvan.nrsc.gov.in/',
+            'Origin': 'https://bhuvan.nrsc.gov.in'
+        }
+        
+        print(f"Requesting WMS tile: {bhuvan_url} with params: {params}")  # Debug logging
+        response = requests.get(bhuvan_url, params=params, headers=headers, timeout=10)
+        print(f"Response status: {response.status_code}")  # Debug logging
+        
+        if response.status_code == 200:
+            return Response(
+                response.content,
+                content_type=response.headers.get('content-type', 'image/png'),
+                status=200
+            )
+        else:
+            print(f"Bhuvan WMS request failed: {response.status_code} - {response.text}")  # Debug logging
+            return f'Tile not found: {z}/{x}/{y}', 404
+            
+    except Exception as e:
+        print(f"Proxy error: {str(e)}")  # Debug logging
+        return str(e), 500
 
-    # Uploads per Day
-    uploads_daily_labels = [res['_id'] for res in daily_format_results]
-    uploads_daily_data = [res['total_uploads'] for res in daily_format_results]
-    print(f"[DEBUG CHARTS] Processed daily uploads (labels: {len(uploads_daily_labels)}, data: {len(uploads_daily_data)})")
+@app.route('/analytics')
+@login_required
+def analytics():
+    query = {}
+    if not current_user.is_admin:
+        user_id_str = current_user.get_id()
+        try:
+            user_id_obj = ObjectId(user_id_str)
+            query['$or'] = [{'user_id': user_id_str}, {'user_id': user_id_obj}]
+        except Exception:
+            query['user_id'] = user_id_str
 
-    # GPS Distribution
-    total_images = sum(res['total_uploads'] for res in daily_format_results)
-    total_gps = sum(res['gps_count'] for res in daily_format_results)
-    total_no_gps = total_images - total_gps
-    print(f"[DEBUG CHARTS] Total Images: {total_images}, With GPS: {total_gps}, Without GPS: {total_no_gps}")
+    try:
+        # Get all images
+        images = Image.objects(query)
+        
+        if not images:
+            return render_template('analytics.html', has_data=False)
 
-    # Format Distribution
-    format_counts = Counter()
-    for res in daily_format_results:
-        format_counts.update(res.get('formats', [])) # Aggregate format counts
-    format_labels = list(format_counts.keys())
-    format_data = list(format_counts.values())
-    print(f"[DEBUG CHARTS] Format Counts: {format_counts}")
-
-    # Location Clusters
-    location_labels = [res['_id'] for res in location_results]
-    location_data = [res['count'] for res in location_results]
-    print(f"[DEBUG CHARTS] Location Clusters (labels: {len(location_labels)}, data: {len(location_data)})")
-
-    # Images per User (Admin)
-    user_labels = []
-    user_data = []
-    if is_admin:
-        user_labels = [res['username'] for res in admin_user_results]
-        user_data = [res['image_count'] for res in admin_user_results]
-        print(f"[DEBUG CHARTS] Images Per User (labels: {len(user_labels)}, data: {len(user_data)})")
-
-
-    # --- Construct Final JSON Response ---
-    chart_data = {
-        'uploadsPerDay': {
-            'labels': uploads_daily_labels,
-            'data': uploads_daily_data,
-        },
-        'gpsDistribution': {
-            'labels': ['With GPS', 'Without GPS'],
-            'data': [total_gps, total_no_gps] if total_images > 0 else []
-        },
-        'formatDistribution': {
-            'labels': format_labels,
-            'data': format_data
-        },
-        'locationClusters': {
-            'labels': location_labels,
-            'data': location_data
-        },
-        'imagesPerUser': None
-    }
-
-    if is_admin:
-        chart_data['imagesPerUser'] = {
-            'labels': user_labels,
-            'data': user_data
+        # Basic stats
+        detection_stats = {
+            'total': len(images),
+            'damage_detected': sum(1 for img in images 
+                                 if img.processing_status == 'complete' 
+                                 and img.prediction_results.get('damage_type', 'No Damage') != 'No Damage'),
+            'failed': sum(1 for img in images if img.processing_status == 'error'),
+            'processing': sum(1 for img in images if img.processing_status == 'processing')
         }
 
-    print(f"[DEBUG CHARTS] Final chart_data payload: {json.dumps(chart_data, indent=2)}") # Pretty print for debugging
-    return jsonify(chart_data)
+        # Add success rate to stats
+        completed_images = sum(1 for img in images if img.processing_status == 'complete')
+        detection_stats['success_rate'] = (completed_images / detection_stats['total'] * 100) if detection_stats['total'] > 0 else 0
+        detection_stats['detection_rate'] = (detection_stats['damage_detected'] / completed_images * 100) if completed_images > 0 else 0
+
+        # Processing Time Analysis
+        valid_times = []
+        time_by_type = defaultdict(list)
+        for img in images:
+            if img.processing_status == 'complete':
+                proc_time = img.processing_time
+                img_type = img.prediction_results.get('model_used', 'Unknown')
+                if proc_time and isinstance(proc_time, (int, float, str)):
+                    try:
+                        proc_time_float = float(proc_time)
+                        if 0 < proc_time_float < 3600:  # Reasonable time limit
+                            valid_times.append(proc_time_float)
+                            time_by_type[img_type].append(proc_time_float)
+                    except (ValueError, TypeError):
+                        continue
+
+        processing_times = {
+            'avg_time': sum(valid_times) / len(valid_times) if valid_times else 0,
+            'max_time': max(valid_times) if valid_times else 0,
+            'min_time': min(valid_times) if valid_times else 0
+        }
+
+        # Average time by type
+        avg_time_by_type = {
+            img_type: sum(times) / len(times) if times else 0
+            for img_type, times in time_by_type.items()
+        }
+
+        # Damage Analysis
+        damage_types = defaultdict(int)
+        confidence_by_type = defaultdict(list)
+        severity_by_type = defaultdict(lambda: defaultdict(int))
+
+        for img in images:
+            pred_results = img.prediction_results
+            if pred_results:  # Remove the damage_detected condition
+                damage_type = pred_results.get('damage_type', 'Unknown')
+                confidence = pred_results.get('confidence', 0)
+                severity = pred_results.get('damage_severity', 'Unknown')
+                
+                # Count all damage types
+                damage_types[damage_type] += 1
+                confidence_by_type[damage_type].append(confidence)
+                severity_by_type[damage_type][severity] += 1
+
+        # Calculate average confidence by type
+        avg_confidence_by_type = {
+            d_type: sum(conf) / len(conf) if conf else 0
+            for d_type, conf in confidence_by_type.items()
+        }
+
+        # Time Distribution Analysis
+        daily_activity = defaultdict(int)
+        daily_distribution = defaultdict(int)
+        
+        # Get date range for last 30 days
+        today = datetime.datetime.now().date()
+        date_range = [(today - datetime.timedelta(days=x)).strftime('%Y-%m-%d') for x in range(30)]
+        
+        # Initialize daily_distribution with zeros for all dates
+        for date in date_range:
+            daily_distribution[date] = 0
+        
+        # Count uploads for each date
+        for img in images:
+            upload_time = img.upload_time
+            if upload_time:
+                # Get day of the week (0 = Monday, 6 = Sunday)
+                day_num = upload_time.weekday()
+                day_name = calendar.day_name[day_num]
+                daily_activity[day_name] += 1
+                
+                # Format date as YYYY-MM-DD
+                date_str = upload_time.strftime('%Y-%m-%d')
+                if date_str in daily_distribution:
+                    daily_distribution[date_str] += 1
+
+        # Sort days of week in correct order
+        sorted_daily_activity = {day: daily_activity[day] for day in calendar.day_name}
+
+        # Sort daily distribution by date
+        sorted_daily_distribution = dict(sorted(daily_distribution.items()))
+
+        # Location Analysis
+        location_stats = []
+        for img in images:
+            metadata = img.metadata
+            location_name = metadata.get('location_name', 'Unknown')
+            pred_results = img.prediction_results
+            
+            # Find existing location or create new one
+            loc_stat = next((loc for loc in location_stats if loc['_id'] == location_name), None)
+            if not loc_stat:
+                loc_stat = {
+                    '_id': location_name,
+                    'count': 0,
+                    'damage_detected': 0,
+                    'confidence_sum': 0,
+                    'confidence_count': 0,
+                    'processing_time_sum': 0,
+                    'processing_time_count': 0
+                }
+                location_stats.append(loc_stat)
+            
+            # Update stats
+            loc_stat['count'] += 1
+            if pred_results.get('damage_detected'):
+                loc_stat['damage_detected'] += 1
+            
+            confidence = pred_results.get('confidence')
+            if confidence is not None:
+                loc_stat['confidence_sum'] += confidence
+                loc_stat['confidence_count'] += 1
+            
+            proc_time = img.processing_time
+            if proc_time and isinstance(proc_time, (int, float, str)):
+                try:
+                    proc_time_float = float(proc_time)
+                    if 0 < proc_time_float < 3600:
+                        loc_stat['processing_time_sum'] += proc_time_float
+                        loc_stat['processing_time_count'] += 1
+                except (ValueError, TypeError):
+                    continue
+
+        # Calculate averages for location stats
+        for loc in location_stats:
+            loc['avg_confidence'] = (loc['confidence_sum'] / loc['confidence_count'] * 100 
+                                   if loc['confidence_count'] > 0 else 0)
+            loc['avg_processing_time'] = (loc['processing_time_sum'] / loc['processing_time_count']
+                                        if loc['processing_time_count'] > 0 else 0)
+            # Clean up temporary fields
+            del loc['confidence_sum'], loc['confidence_count']
+            del loc['processing_time_sum'], loc['processing_time_count']
+
+        # Error Analysis
+        error_analysis = []
+        error_counts = defaultdict(int)
+        error_times = defaultdict(list)
+        
+        for img in images:
+            if img.processing_status == 'error':
+                error = img.error_message or 'Unknown Error'
+                proc_time = img.processing_time or 0
+                error_counts[error] += 1
+                error_times[error].append(float(proc_time) if proc_time else 0)
+        
+        for error, count in error_counts.items():
+            times = error_times[error]
+            error_analysis.append({
+                'type': error,
+                'count': count,
+                'avg_time_impact': sum(times) / len(times) if times else 0
+            })
+
+        return render_template('analytics.html',
+            has_data=True,
+            detection_stats=detection_stats,
+            processing_times=processing_times,
+            avg_time_by_type=avg_time_by_type,
+            damage_types=dict(damage_types),
+            severity_by_type=dict(severity_by_type),
+            avg_confidence_by_type=avg_confidence_by_type,
+            daily_activity=sorted_daily_activity,
+            daily_distribution=sorted_daily_distribution,
+            location_stats=location_stats,
+            error_analysis=error_analysis)
+
+    except Exception as e:
+        print(f"Error in analytics route: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return render_template('analytics.html', 
+                             has_data=False, 
+                             error_message=str(e),
+                             show_error=True)
+
+@app.route('/delete_stuck_images', methods=['POST'])
+@login_required
+def delete_stuck_images():
+    if not current_user.is_admin:
+        flash('Admin privileges required.', 'danger')
+        return redirect(url_for('dashboard'))
+    
+    try:
+        # Define cutoff time (e.g., images stuck in 'processing' for more than 1 hour)
+        cutoff_time = datetime.datetime.now() - datetime.timedelta(hours=1)
+        
+        # Find stuck images using MongoEngine
+        stuck_images = Image.objects(
+            processing_status='processing',
+            upload_time__lt=cutoff_time # Check upload_time as creation marker
+        )
+        
+        deleted_count = 0
+        file_errors = 0
+        
+        for image in stuck_images:
+            try:
+                # Attempt to delete associated files
+                if image.file_path and os.path.exists(image.file_path):
+                    try:
+                        os.remove(image.file_path)
+                    except OSError as e:
+                        print(f"Error deleting file {image.file_path}: {e}")
+                        file_errors += 1
+                
+                # Delete the image document
+                image.delete()
+                deleted_count += 1
+            except Exception as inner_e:
+                print(f"Error deleting stuck image {image.id}: {inner_e}")
+        
+        message = f"Attempted to delete {deleted_count} stuck image(s)." 
+        if file_errors > 0:
+             message += f" Failed to delete {file_errors} associated file(s)."
+        flash(message, 'success' if file_errors == 0 else 'warning')
+        
+    except Exception as e:
+        flash(f'An error occurred while deleting stuck images: {str(e)}', 'danger')
+        import traceback
+        traceback.print_exc()
+        
+    return redirect(url_for('dashboard'))
+
+@app.route('/image/stop_and_delete/<image_id>', methods=['POST'])
+@login_required
+def stop_and_delete_image(image_id):
+    if not current_user.is_admin:
+        flash('Admin privileges required.', 'danger')
+        return redirect(url_for('dashboard'))
+
+    try:
+        # Find the image using MongoEngine
+        image = Image.objects(id=ObjectId(image_id)).first()
+        
+        if not image:
+            flash('Image not found.', 'danger')
+            return jsonify({'success': False, 'message': 'Image not found'}), 404
+
+        # Check if it's actually processing (optional, could delete regardless)
+        if image.processing_status not in ['pending', 'processing']:
+             flash(f'Image {image.original_filename or image.id} is not currently processing.', 'info')
+             # Optionally, still allow deletion or return an error
+             # return jsonify({'success': False, 'message': 'Image not processing'}), 400
+
+        print(f"Attempting to stop and delete image {image.id}...")
+        # NOTE: Stopping the actual thread in thread_pool is complex and 
+        # often not practical/safe. The simplest approach is to just delete 
+        # the record and files. The background thread will eventually error out 
+        # when it tries to save results to the non-existent DB record.
+        
+        # Attempt to delete associated files
+        files_to_delete = []
+        if image.file_path and os.path.exists(image.file_path):
+            files_to_delete.append(image.file_path)
+        if image.annotated_image_path and os.path.exists(image.annotated_image_path):
+             files_to_delete.append(image.annotated_image_path)
+
+        deleted_files = True
+        for file_path in files_to_delete:
+            try:
+                os.remove(file_path)
+            except OSError as e:
+                print(f"Error deleting file {file_path} for image {image.id}: {e}")
+                deleted_files = False
+
+        # Delete the document from the database
+        image.delete()
+        print(f"Deleted image document {image.id}")
+        
+        message = 'Processing stopped and image deleted.' if deleted_files else 'Processing stopped, image record deleted, but failed to remove files.'
+        flash(message, 'success' if deleted_files else 'warning')
+        return jsonify({'success': True, 'message': message})
+
+    except Exception as e:
+        print(f"Error stopping/deleting image {image_id}: {e}")
+        flash('An error occurred during stop/delete.', 'danger')
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'message': 'Server error during deletion'}), 500
 
 # Helper function (example - if needed elsewhere)
 # def some_helper():

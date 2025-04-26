@@ -1,86 +1,220 @@
 {% extends "base.html" %}
 
-{% block title %}Map View - Image Metadata Extractor{% endblock %}
+{% block title %}Map View - RoadAISafety{% endblock %}
 
-{% block head %}
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+{% block styles %}
+<!-- OpenLayers CSS -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/openlayers/openlayers.github.io@master/en/v6.15.1/css/ol.css" type="text/css">
+
 <style>
     #map {
         height: 600px;
         width: 100%;
-        border-radius: 0.25rem;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .photo-popup img {
-        max-width: 150px;
-        max-height: 150px;
+    .disclaimer {
+        font-size: 0.8rem;
+        color: #666;
+        margin-bottom: 1rem;
+    }
+    .popup-content {
+        text-align: center;
+        max-width: 200px;
+    }
+    .popup-content img {
+        max-width: 100%;
+        height: auto;
+        margin-bottom: 8px;
+        border-radius: 4px;
+    }
+    .ol-popup {
+        position: absolute;
+        background-color: white;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #cccccc;
+        bottom: 12px;
+        left: -50px;
+        min-width: 280px;
+        display: none;
+    }
+    .ol-popup.visible {
         display: block;
-        margin: 0 auto 10px;
+    }
+    .ol-popup:after, .ol-popup:before {
+        top: 100%;
+        border: solid transparent;
+        content: " ";
+        height: 0;
+        width: 0;
+        position: absolute;
+        pointer-events: none;
+    }
+    .ol-popup:after {
+        border-top-color: white;
+        border-width: 10px;
+        left: 48px;
+        margin-left: -10px;
+    }
+    .ol-popup:before {
+        border-top-color: #cccccc;
+        border-width: 11px;
+        left: 48px;
+        margin-left: -11px;
     }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="row mb-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0">Image Locations</h5>
-            </div>
-            <div class="card-body p-0">
-                <div id="map"></div>
-            </div>
-            <div class="card-footer">
-                <small class="text-muted">
-                    <i class="fas fa-info-circle me-1"></i> Displaying images that have GPS coordinates in their metadata.
-                </small>
-            </div>
-        </div>
+<div class="container">
+    <h2 class="mb-3">Image Locations</h2>
+    <p class="disclaimer">Note: This map uses ISRO's Bhuvan service and follows Survey of India guidelines.</p>
+    
+    {% if not images %}
+    <div class="alert alert-info">
+        No images with location data available.
+    </div>
+    {% endif %}
+    
+    <div id="map"></div>
+    <div id="popup" class="ol-popup">
+        <div id="popup-content"></div>
     </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<!-- OpenLayers JavaScript -->
+<script src="https://cdn.jsdelivr.net/gh/openlayers/openlayers.github.io@master/en/v6.15.1/build/ol.js"></script>
+
 <script>
-    document.addEventListener('DOMContentLoaded', function() {
-        // Parse the geo_images JSON from Python
-        const geoImages = {{ geo_images|safe }};
-        
-        if (geoImages.length === 0) {
-            document.getElementById('map').innerHTML = '<div class="alert alert-info m-3 text-center py-5"><i class="fas fa-map-marker-alt fa-3x mb-3"></i><h4>No Images with Location Data</h4><p>Upload images with GPS coordinates to see them on the map.</p></div>';
-            return;
-        }
-        
-        // Initialize the map
-        const map = L.map('map');
-        
-        // Add the OpenStreetMap tiles
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        }).addTo(map);
-        
-        // Add markers for each image
-        const markers = [];
-        
-        geoImages.forEach(function(image) {
-            const marker = L.marker([image.latitude, image.longitude])
-                .addTo(map)
-                .bindPopup(`
-                    <div class="photo-popup text-center">
-                        <img src="${image.thumbnail}" alt="${image.filename}" class="img-thumbnail">
-                        <strong>${image.filename}</strong><br>
-                        <a href="/image/${image.id}" class="btn btn-sm btn-primary mt-2">View Details</a>
-                    </div>
-                `);
-            
-            markers.push(marker);
-        });
-        
-        // Create a bounds object and extend it with all markers
-        if (markers.length > 0) {
-            const bounds = L.featureGroup(markers).getBounds();
-            map.fitBounds(bounds, { padding: [50, 50] });
+document.addEventListener('DOMContentLoaded', function() {
+    // Create the popup overlay
+    var container = document.getElementById('popup');
+    var content = document.getElementById('popup-content');
+    var overlay = new ol.Overlay({
+        element: container,
+        autoPan: true,
+        autoPanAnimation: {
+            duration: 250
         }
     });
+
+    // Define the extent for India (including disputed territories)
+    var indiaExtent = ol.proj.transformExtent([68.1766, 6.2325, 97.4025, 37.5], 'EPSG:4326', 'EPSG:3857');
+
+    // Create the map with Bhuvan WMS layer
+    var map = new ol.Map({
+        target: 'map',
+        overlays: [overlay],
+        layers: [
+            new ol.layer.Tile({
+                source: new ol.source.TileWMS({
+                    url: '/bhuvan-proxy',
+                    params: {
+                        'LAYERS': 'india3',
+                        'FORMAT': 'image/png',
+                        'TRANSPARENT': true
+                    },
+                    serverType: 'geoserver',
+                    crossOrigin: 'anonymous',
+                    projection: 'EPSG:4326',
+                    tileGrid: new ol.tilegrid.TileGrid({
+                        extent: [-180, -90, 180, 90],
+                        resolutions: Array.from({length: 19}, (_, i) => 360 / (256 * Math.pow(2, i))),
+                        tileSize: [256, 256],
+                        origin: [-180, 90]
+                    })
+                })
+            })
+        ],
+        view: new ol.View({
+            center: ol.proj.fromLonLat([78.9629, 20.5937]), // Center of India
+            zoom: 5,
+            minZoom: 4,
+            maxZoom: 18,
+            extent: indiaExtent,
+            constrainOnlyCenter: true
+        })
+    });
+
+    // Add markers for images
+    var features = [];
+    {% for image in images %}
+        {% if image.metadata and image.metadata.gps_latitude and image.metadata.gps_longitude %}
+            var feature = new ol.Feature({
+                geometry: new ol.geom.Point(
+                    ol.proj.fromLonLat([{{ image.metadata.gps_longitude }}, {{ image.metadata.gps_latitude }}])
+                ),
+                name: "{{ image.filename }}",
+                image_id: "{{ image._id }}"
+            });
+            features.push(feature);
+        {% endif %}
+    {% endfor %}
+
+    // Create vector source and layer for markers
+    var vectorSource = new ol.source.Vector({
+        features: features
+    });
+
+    var vectorLayer = new ol.layer.Vector({
+        source: vectorSource,
+        style: new ol.style.Style({
+            image: new ol.style.Circle({
+                radius: 8,
+                fill: new ol.style.Fill({color: '#3388ff'}),
+                stroke: new ol.style.Stroke({color: '#fff', width: 2})
+            })
+        })
+    });
+
+    map.addLayer(vectorLayer);
+
+    // Add click handler for features
+    map.on('click', function(evt) {
+        var feature = map.forEachFeatureAtPixel(evt.pixel, function(feature) {
+            return feature;
+        });
+
+        if (feature) {
+            var coordinates = feature.getGeometry().getCoordinates();
+            var popupContent = '<div class="popup-content">' +
+                '<p>' + feature.get('name') + '</p>' +
+                '<a href="/image/' + feature.get('image_id') + '" class="btn btn-sm btn-primary">View Details</a>' +
+                '</div>';
+            
+            content.innerHTML = popupContent;
+            container.classList.add('visible');
+            overlay.setPosition(coordinates);
+        } else {
+            container.classList.remove('visible');
+            overlay.setPosition(undefined);
+        }
+    });
+
+    // Change mouse cursor when over marker
+    map.on('pointermove', function(e) {
+        if (e.dragging) return;
+        
+        var pixel = map.getEventPixel(e.originalEvent);
+        var hit = map.hasFeatureAtPixel(pixel);
+        var mapElement = map.getTargetElement();
+        if (mapElement) {
+            mapElement.style.cursor = hit ? 'pointer' : '';
+        }
+    });
+
+    // Fit to markers if they exist
+    if (features.length > 0) {
+        var extent = vectorSource.getExtent();
+        map.getView().fit(extent, {
+            padding: [50, 50, 50, 50],
+            maxZoom: 12
+        });
+    }
+});
 </script>
 {% endblock %}
