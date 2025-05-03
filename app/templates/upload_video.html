@@ -1,0 +1,436 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Video - RoadAISafety{% endblock %}
+
+{% block styles %}
+{{ super() }}
+<style>
+    .upload-container {
+        max-width: 800px;
+        margin: 0 auto;
+    }
+    .drag-drop-area {
+        border: 2px dashed #ccc;
+        border-radius: 10px;
+        padding: 30px;
+        text-align: center;
+        margin-bottom: 20px;
+        background-color: #f8f9fa;
+        transition: all 0.3s ease;
+    }
+    .drag-drop-area:hover, .drag-drop-area.highlight {
+        border-color: #007bff;
+        background-color: #e8f0fe;
+    }
+    .upload-icon {
+        font-size: 48px;
+        color: #6c757d;
+        margin-bottom: 15px;
+    }
+    .form-label {
+        font-weight: 600;
+    }
+    .upload-preview {
+        margin-top: 20px;
+    }
+    .preview-item {
+        position: relative;
+        display: inline-block;
+        margin: 10px;
+    }
+    .preview-remove {
+        position: absolute;
+        top: -10px;
+        right: -10px;
+        background: #dc3545;
+        color: white;
+        border-radius: 50%;
+        width: 24px;
+        height: 24px;
+        text-align: center;
+        line-height: 24px;
+        cursor: pointer;
+    }
+    .preview-video {
+        max-width: 150px;
+        max-height: 150px;
+        border-radius: 5px;
+    }
+    .preview-icon {
+        font-size: 48px;
+        color: #6c757d;
+    }
+    .upload-illustration {
+        max-width: 100%;
+        height: auto;
+        margin-bottom: 30px;
+        border-radius: 10px;
+        box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    }
+    .upload-progress {
+        margin-top: 20px;
+        display: none;
+    }
+    .status-message {
+        margin-top: 15px;
+        font-weight: 500;
+    }
+    .upload-steps {
+        margin-top: 20px;
+        text-align: left;
+    }
+    .upload-step {
+        padding: 10px;
+        margin-bottom: 10px;
+        border-radius: 5px;
+        background-color: #f8f9fa;
+        border-left: 3px solid #dee2e6;
+    }
+    .step-pending {
+        border-left-color: #6c757d;
+    }
+    .step-active {
+        border-left-color: #007bff;
+        background-color: #e8f0fe;
+    }
+    .step-complete {
+        border-left-color: #28a745;
+    }
+    .step-error {
+        border-left-color: #dc3545;
+        background-color: #f8d7da;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <div class="row">
+        <div class="col-md-10 mx-auto">
+            <div class="card shadow-sm">
+                <div class="card-body p-4">
+                    <div class="text-center mb-4">
+                        <img src="/static/upload-video.png" alt="Upload Illustration" class="upload-illustration">
+                        <h2 class="card-title mb-3">Upload Videos</h2>
+                        <p class="text-muted">Upload your road videos to analyze for hazards and damage</p>
+                    </div>
+                    
+                    <form method="POST" enctype="multipart/form-data" id="upload-form">
+                        {{ form.hidden_tag() }}
+                        
+                        <div class="upload-container">
+                            <div class="mb-4">
+                                <label for="{{ form.image_type.id }}" class="form-label">Damage Type to Focus On</label>
+                                {{ form.image_type(class="form-select") }}
+                                {% if form.image_type.errors %}
+                                    <div class="invalid-feedback d-block">
+                                        {% for error in form.image_type.errors %}
+                                            {{ error }}
+                                        {% endfor %}
+                                    </div>
+                                {% endif %}
+                            </div>
+                            
+                            <div class="drag-drop-area" id="drop-area">
+                                <i class="fas fa-film upload-icon"></i>
+                                <h5>Drag & Drop Videos Here</h5>
+                                <p class="text-muted">or</p>
+                                {{ form.videos(class="form-control", id="file-input", style="display: none;", multiple=true) }}
+                                <button type="button" class="btn btn-primary" id="browse-btn">Browse Files</button>
+                                <p class="text-muted mt-2">
+                                    <small>Supported formats: MP4, MOV, AVI</small><br>
+                                    <small>You can upload up to 100 videos at once</small>
+                                </p>
+                                <div id="file-count" class="mt-2 d-none">
+                                    <span class="badge bg-primary">0 files selected</span>
+                                </div>
+                                {% if form.videos.errors %}
+                                    <div class="invalid-feedback d-block">
+                                        {% for error in form.videos.errors %}
+                                            {{ error }}
+                                        {% endfor %}
+                                    </div>
+                                {% endif %}
+                            </div>
+                            
+                            <div id="preview-container"></div>
+                            
+                            <!-- Upload Progress UI -->
+                            <div id="upload-progress" class="upload-progress">
+                                <h5 class="text-center mb-3">Processing Your Videos</h5>
+                                <div class="progress">
+                                    <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%"></div>
+                                </div>
+                                <p id="status-message" class="text-center status-message">Preparing files for upload...</p>
+                                
+                                <div class="upload-steps">
+                                    <div id="step-upload" class="upload-step step-pending">
+                                        <i class="fas fa-upload me-2"></i> <span>Uploading files to server</span>
+                                    </div>
+                                    <div id="step-process" class="upload-step step-pending">
+                                        <i class="fas fa-cogs me-2"></i> <span>Processing videos</span>
+                                    </div>
+                                    <div id="step-extract" class="upload-step step-pending">
+                                        <i class="fas fa-film me-2"></i> <span>Extracting frames</span>
+                                    </div>
+                                    <div id="step-analyze" class="upload-step step-pending">
+                                        <i class="fas fa-search me-2"></i> <span>Analyzing for damage</span>
+                                    </div>
+                                    <div id="step-complete" class="upload-step step-pending">
+                                        <i class="fas fa-check-circle me-2"></i> <span>Processing complete</span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="text-center mt-4">
+                                <button type="submit" class="btn btn-success btn-lg px-5" id="upload-btn" disabled>
+                                    <i class="fas fa-upload me-2"></i> Upload Videos
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const uploadForm = document.getElementById('upload-form');
+        const dropArea = document.getElementById('drop-area');
+        const fileInput = document.getElementById('file-input');
+        const browseBtn = document.getElementById('browse-btn');
+        const previewContainer = document.getElementById('preview-container');
+        const uploadBtn = document.getElementById('upload-btn');
+        const fileCountDisplay = document.getElementById('file-count');
+        const uploadProgress = document.getElementById('upload-progress');
+        const progressBar = document.getElementById('progress-bar');
+        const statusMessage = document.getElementById('status-message');
+        
+        // Process Step Elements
+        const stepUpload = document.getElementById('step-upload');
+        const stepProcess = document.getElementById('step-process');
+        const stepExtract = document.getElementById('step-extract');
+        const stepAnalyze = document.getElementById('step-analyze');
+        const stepComplete = document.getElementById('step-complete');
+        
+        // Handle form submission to show processing state
+        uploadForm.addEventListener('submit', function(e) {
+            if (fileInput.files.length === 0) {
+                e.preventDefault();
+                alert('Please select at least one file to upload');
+                return false;
+            }
+            
+            // Hide drop area and preview
+            dropArea.style.display = 'none';
+            previewContainer.style.display = 'none';
+            
+            // Show progress UI
+            uploadProgress.style.display = 'block';
+            
+            // Change upload button to processing state
+            uploadBtn.disabled = true;
+            uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i> Processing...';
+            
+            // Update step UI
+            updateStep(stepUpload, 'active');
+            
+            // Animate progress bar
+            animateProgress();
+            
+            // Let the form submit normally
+            console.log("Form submitted with", fileInput.files.length, "files");
+            return true;
+        });
+        
+        function animateProgress() {
+            let progress = 0;
+            
+            // First phase - upload (0-20%)
+            setTimeout(() => {
+                updateProgress(20, "Uploading videos to server...");
+                updateStep(stepUpload, 'complete');
+                updateStep(stepProcess, 'active');
+                
+                // Second phase - processing (20-40%)
+                setTimeout(() => {
+                    updateProgress(40, "Processing videos on server...");
+                    updateStep(stepProcess, 'complete');
+                    updateStep(stepExtract, 'active');
+                    
+                    // Third phase - extracting frames (40-60%)
+                    setTimeout(() => {
+                        updateProgress(60, "Extracting frames from videos...");
+                        updateStep(stepExtract, 'complete');
+                        updateStep(stepAnalyze, 'active');
+                        
+                        // Fourth phase - analyzing (60-90%)
+                        setTimeout(() => {
+                            updateProgress(90, "Analyzing frames for road damage...");
+                        }, 4000);
+                        
+                    }, 5000);
+                    
+                }, 4000);
+            }, 2000);
+        }
+        
+        function updateProgress(percent, message) {
+            progressBar.style.width = percent + '%';
+            progressBar.setAttribute('aria-valuenow', percent);
+            
+            if (message) {
+                statusMessage.textContent = message;
+            }
+        }
+        
+        function updateStep(stepElement, status) {
+            // Remove all status classes
+            stepElement.classList.remove('step-pending', 'step-active', 'step-complete', 'step-error');
+            
+            // Add the new status class
+            stepElement.classList.add('step-' + status);
+            
+            // Update icon based on status
+            const iconElement = stepElement.querySelector('i');
+            if (iconElement) {
+                iconElement.className = getIconForStatus(status);
+            }
+        }
+        
+        function getIconForStatus(status) {
+            switch(status) {
+                case 'active':
+                    return 'fas fa-spinner fa-spin me-2';
+                case 'complete':
+                    return 'fas fa-check me-2';
+                case 'error':
+                    return 'fas fa-times me-2';
+                default:
+                    return 'fas fa-circle me-2';
+            }
+        }
+        
+        // Open file selection dialog when browse button is clicked
+        browseBtn.addEventListener('click', function() {
+            fileInput.click();
+        });
+        
+        // Handle file selection
+        fileInput.addEventListener('change', handleFiles);
+        
+        // Prevent default behavior for drag events
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, preventDefaults, false);
+        });
+        
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        
+        // Highlight drop area when file is dragged over it
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropArea.addEventListener(eventName, highlight, false);
+        });
+        
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropArea.addEventListener(eventName, unhighlight, false);
+        });
+        
+        function highlight() {
+            dropArea.classList.add('highlight');
+        }
+        
+        function unhighlight() {
+            dropArea.classList.remove('highlight');
+        }
+        
+        // Handle dropped files
+        dropArea.addEventListener('drop', function(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            
+            // Create a new FileList-like object from the dropped files
+            const dataTransfer = new DataTransfer();
+            for (let i = 0; i < files.length; i++) {
+                if (files[i].name.match(/\.(mp4|mov|avi|mkv|wmv)$/i)) {
+                    dataTransfer.items.add(files[i]);
+                }
+            }
+            
+            // Assign the files to the file input
+            fileInput.files = dataTransfer.files;
+            handleFiles();
+        });
+        
+        function handleFiles() {
+            const files = fileInput.files;
+            console.log("Files selected:", files.length);
+            updateFileCount(files.length);
+            updateFilePreview(files);
+            
+            // Enable upload button if files are selected
+            uploadBtn.disabled = files.length === 0;
+            
+            // Reset upload button text if it was in processing state
+            if (uploadBtn.innerHTML.includes('Processing')) {
+                uploadBtn.innerHTML = '<i class="fas fa-upload me-2"></i> Upload Videos';
+            }
+        }
+        
+        function updateFileCount(count) {
+            fileCountDisplay.classList.remove('d-none');
+            const badgeClass = count > 100 ? 'bg-danger' : 'bg-primary';
+            fileCountDisplay.innerHTML = `<span class="badge ${badgeClass}">${count} file${count === 1 ? '' : 's'} selected</span>`;
+            
+            if (count > 100) {
+                fileCountDisplay.innerHTML += `<div class="text-danger mt-1">Maximum 100 files allowed</div>`;
+            }
+        }
+        
+        function updateFilePreview(files) {
+            previewContainer.innerHTML = '';
+            
+            // Limit preview display to avoid performance issues
+            const maxPreviewFiles = Math.min(files.length, 12);
+            
+            if (files.length > 0) {
+                for (let i = 0; i < maxPreviewFiles; i++) {
+                    const file = files[i];
+                    
+                    const previewItem = document.createElement('div');
+                    previewItem.className = 'preview-item';
+                    
+                    // For videos, we just show an icon
+                    const videoIcon = document.createElement('div');
+                    videoIcon.className = 'text-center';
+                    videoIcon.innerHTML = '<i class="fas fa-film preview-icon"></i>';
+                    
+                    previewItem.appendChild(videoIcon);
+                    
+                    const fileInfo = document.createElement('div');
+                    fileInfo.className = 'text-center mt-1';
+                    fileInfo.textContent = file.name.length > 15 ? file.name.substring(0, 12) + '...' : file.name;
+                    
+                    previewItem.appendChild(fileInfo);
+                    previewContainer.appendChild(previewItem);
+                }
+                
+                // Add message if there are more files than preview limit
+                if (files.length > maxPreviewFiles) {
+                    const moreMessage = document.createElement('div');
+                    moreMessage.className = 'alert alert-info mt-3 w-100 text-center';
+                    moreMessage.innerHTML = `<i class="fas fa-info-circle me-2"></i> Showing ${maxPreviewFiles} of ${files.length} files`;
+                    previewContainer.appendChild(moreMessage);
+                }
+            }
+        }
+    });
+</script>
+{% endblock %} 

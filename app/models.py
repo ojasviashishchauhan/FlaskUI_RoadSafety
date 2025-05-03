@@ -40,6 +40,7 @@ class Image(Document):
     file_path = StringField()
     user_id = ObjectIdField(required=True)
     upload_time = DateTimeField(default=datetime.utcnow)
+    media_type = StringField(default='image', choices=['image', 'video'])
     completion_time = DateTimeField()
     processing_status = StringField(default='pending')
     error_message = StringField()
@@ -57,7 +58,8 @@ class Image(Document):
             'user_id',
             'upload_time',
             'processing_status',
-            'filename'
+            'filename',
+            'media_type'
         ],
         'strict': False
     }

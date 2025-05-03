@@ -37,14 +37,26 @@
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}">Dashboard</a>
                     </li>
-                    <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint == 'upload' %}active{% endif %}" href="{{ url_for('upload') }}">Upload</a>
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle {% if request.endpoint.startswith('upload_') %}active{% endif %}" href="#" id="uploadDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                            Upload
+                        </a>
+                        <ul class="dropdown-menu" aria-labelledby="uploadDropdown">
+                            <li><a class="dropdown-item {% if request.endpoint == 'upload_image' %}active{% endif %}" href="{{ url_for('upload_image') }}">Upload Images</a></li>
+                            <li><a class="dropdown-item {% if request.endpoint == 'upload_video' %}active{% endif %}" href="{{ url_for('upload_video') }}">Upload Videos</a></li>
+                        </ul>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint == 'map_view' %}active{% endif %}" href="{{ url_for('map_view') }}">Map</a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link {% if request.endpoint == 'analytics' %}active{% endif %}" href="{{ url_for('analytics') }}">Analytics</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('city_analytics') }}">City Analytics</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('region_analytics') }}">Region Analytics</a>
                     </li>
                     {% endif %}
                 </ul>

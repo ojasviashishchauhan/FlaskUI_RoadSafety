@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h4>Debug Information</h4>
+                </div>
+                <div class="card-body">
+                    <h5>Debug Session Details</h5>
+                    <table class="table table-striped">
+                        <tbody>
+                            {% for key, value in debug_info.items() %}
+                            <tr>
+                                <th>{{ key }}</th>
+                                <td>{{ value }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    
+                    <hr>
+
+                    <ul class="nav nav-tabs" id="debugTabs" role="tablist">
+                        {% for group_name, images in image_groups.items() %}
+                            {% if images %}
+                            <li class="nav-item" role="presentation">
+                                <a class="nav-link {% if loop.first %}active{% endif %}" 
+                                   id="{{ group_name|replace(' ', '-')|lower }}-tab" 
+                                   data-toggle="tab" 
+                                   href="#{{ group_name|replace(' ', '-')|lower }}" 
+                                   role="tab" 
+                                   aria-controls="{{ group_name|replace(' ', '-')|lower }}" 
+                                   aria-selected="{% if loop.first %}true{% else %}false{% endif %}">
+                                    {{ group_name }} <span class="badge badge-primary">{{ images|length }}</span>
+                                </a>
+                            </li>
+                            {% endif %}
+                        {% endfor %}
+                    </ul>
+                    
+                    <div class="tab-content" id="debugTabContent">
+                        {% for group_name, images in image_groups.items() %}
+                            {% if images %}
+                            <div class="tab-pane fade {% if loop.first %}show active{% endif %}" 
+                                 id="{{ group_name|replace(' ', '-')|lower }}" 
+                                 role="tabpanel" 
+                                 aria-labelledby="{{ group_name|replace(' ', '-')|lower }}-tab">
+                                <div class="row mt-4">
+                                    {% for img_path in images %}
+                                    <div class="col-md-6 mb-4">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h5 class="card-title">{{ img_path.split('/')[-1] }}</h5>
+                                            </div>
+                                            <div class="card-body text-center">
+                                                <img src="/{{ img_path }}" class="img-fluid debug-image" alt="{{ img_path }}">
+                                            </div>
+                                            <div class="card-footer">
+                                                <a href="/{{ img_path }}" class="btn btn-sm btn-primary" target="_blank">View Full Size</a>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">Back to Dashboard</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<style>
+.debug-image {
+    max-height: 400px;
+    border: 1px solid #ddd;
+}
+.card-header h5 {
+    margin-bottom: 0;
+    font-size: 0.9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+</style>
+{% endblock %} 

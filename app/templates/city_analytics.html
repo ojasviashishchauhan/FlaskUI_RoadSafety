@@ -1,0 +1,380 @@
+{% extends "base.html" %}
+
+{% block title %}City Analytics - RoadAISafety{% endblock %}
+
+{% block styles %}
+{{ super() }}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+    .city-card {
+        border-radius: 10px;
+        overflow: hidden;
+        transition: transform 0.3s ease;
+        margin-bottom: 20px;
+    }
+    
+    .city-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+    }
+    
+    .city-header {
+        background-color: #f8f9fa;
+        padding: 15px;
+        border-bottom: 1px solid #dee2e6;
+    }
+    
+    .damage-badge {
+        font-size: 0.85rem;
+        margin-right: 5px;
+        margin-bottom: 5px;
+    }
+    
+    .stats-table th {
+        background-color: #f8f9fa;
+    }
+    
+    .stats-table tr:hover {
+        background-color: rgba(0,123,255,0.05);
+    }
+    
+    .damage-type-cell {
+        min-width: 100px;
+    }
+    
+    .progress {
+        height: 8px;
+        margin-top: 5px;
+    }
+    
+    .table-responsive {
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 0 15px rgba(0,0,0,0.05);
+    }
+    
+    #loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(255, 255, 255, 0.8);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1000;
+    }
+    
+    .refresh-btn {
+        margin-left: 10px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid mt-4 mb-5">
+    <div class="row mb-3">
+        <div class="col-md-8">
+            <h2>City-Based Damage Analytics</h2>
+            <p class="text-muted">Breakdown of road damage by city based on image location data</p>
+        </div>
+        <div class="col-md-4 text-md-end">
+            <button id="refresh-data" class="btn btn-outline-primary me-2">
+                <i class="fas fa-sync-alt me-1"></i> Refresh Data
+            </button>
+            <a href="{{ url_for('map_view') }}" class="btn btn-primary">
+                <i class="fas fa-map-marker-alt me-2"></i> View on Map
+            </a>
+        </div>
+    </div>
+    
+    <div id="loading-overlay" style="display:none;">
+        <div class="text-center">
+            <div class="spinner-border text-primary mb-3" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <h5>Loading city analytics data...</h5>
+        </div>
+    </div>
+    
+    <div id="analytics-content">
+    {% if not has_data %}
+    <div class="alert alert-info">
+        <h4 class="alert-heading">No Location Data Available</h4>
+        <p>There is currently no location data available to analyze by city.</p>
+        <hr>
+        <p class="mb-0">Upload images or videos with GPS metadata to generate city-based analytics.</p>
+        <a href="{{ url_for('upload_image') }}" class="btn btn-primary mt-3">Upload Images</a>
+        <a href="{{ url_for('upload_video') }}" class="btn btn-outline-primary mt-3">Upload Videos</a>
+    </div>
+    {% elif show_error %}
+    <div class="alert alert-danger">
+        <h4 class="alert-heading">Error Loading Analytics</h4>
+        <p>{{ error_message }}</p>
+    </div>
+    {% else %}
+
+    {# --- Add Summary Stats --- #}
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card shadow-sm">
+                <div class="card-body text-center">
+                    <h6 class="card-subtitle mb-2 text-muted">Cities Analyzed</h6>
+                    <p class="card-text fs-4 fw-bold">{{ overall_summary.total_cities }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow-sm">
+                <div class="card-body text-center">
+                    <h6 class="card-subtitle mb-2 text-muted">Avg. Damage Rate</h6>
+                    <p class="card-text fs-4 fw-bold">{{ overall_summary.avg_damage_perc }}%</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card shadow-sm">
+                <div class="card-body text-center">
+                    <h6 class="card-subtitle mb-2 text-muted">Highest Damage City</h6>
+                    <p class="card-text fs-5 fw-bold">{{ overall_summary.highest_damage_city_name }}</p>
+                     <span class="badge bg-danger">{{ overall_summary.highest_damage_city_perc }}%</span>
+                </div>
+            </div>
+        </div>
+        {# Add more summary cards if needed #}
+    </div>
+    {# --- End Summary Stats --- #}
+
+    {# --- Add Map and Table Side-by-Side --- #}
+    <div class="row mb-4">
+        <div class="col-lg-5 mb-4 mb-lg-0">
+            <div class="card h-100">
+                 <div class="card-header">
+                     <h5 class="card-title mb-0"><i class="fas fa-map-marked-alt me-1"></i> City Damage Map</h5>
+                 </div>
+                 <div class="card-body">
+                     <div id="cityMap" style="height: 500px; width: 100%; border-radius: 8px;"></div>
+                 </div>
+            </div>
+        </div>
+        <div class="col-lg-7">
+             <div class="card h-100">
+                 <div class="card-header">
+                     <h5 class="card-title mb-0"><i class="fas fa-list-ol me-1"></i> City Summary List</h5>
+                 </div>
+                 <div class="card-body p-3" style="max-height: 500px; overflow-y: auto;">
+                    {# --- Add Filter Input --- #}
+                    <div class="mb-3 input-group input-group-sm">
+                        {# --- Add icon --- #}
+                        <span class="input-group-text"><i class="fas fa-search"></i></span>
+                        <input type="text" id="cityFilterInput" class="form-control" placeholder="Filter by city...">
+                    </div>
+                    {# --- End Filter Input --- #}
+                    <div class="table-responsive" style="overflow-x: auto;">
+                        <table class="table table-hover table-sm stats-table mb-0">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>City</th>
+                                    <th class="text-center">Total</th>
+                                    <th class="text-center">Damaged</th>
+                                    <th class="text-center">Damage %</th>
+                                    <th>Top Damage Types</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for city, stats in city_stats.items() %}
+                                <tr>
+                                    <td><strong>{{ city }}</strong></td>
+                                    <td class="text-center">{{ stats.total }}</td>
+                                    <td class="text-center">{{ stats.total_with_damage }}</td>
+                                    <td class="text-center">
+                                        {{ stats.damage_percentage }}%
+                                        <div class="progress">
+                                            <div class="progress-bar bg-danger" role="progressbar" 
+                                                style="width: {{ stats.damage_percentage }}%" 
+                                                aria-valuenow="{{ stats.damage_percentage }}" 
+                                                aria-valuemin="0" 
+                                                aria-valuemax="100">
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        {% for damage_type, count in stats.damage_types.items() %}
+                                            {% if damage_type != "None" %}
+                                                <span class="badge bg-primary damage-badge">
+                                                    {{ damage_type }}: {{ count }}
+                                                </span>
+                                            {% endif %}
+                                        {% endfor %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    {% if has_data and not show_error %}
+        const cityStats = {{ city_stats|tojson }};
+        
+        // --- Initialize Map --- 
+        const map = L.map('cityMap').setView([20.5937, 78.9629], 5); // Center on India
+        // --- Switch to Google Satellite Tiles --- 
+        L.tileLayer('https://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',{
+            maxZoom: 20,
+            subdomains:['mt0','mt1','mt2','mt3'],
+            attribution: '&copy; <a href="https://maps.google.com">Google Maps</a>'
+        // --- End Switch --- 
+        }).addTo(map);
+
+        const markers = L.layerGroup();
+        const bounds = L.latLngBounds();
+        let addedMarkers = 0;
+
+        // --- Add Markers for Cities --- 
+        for (const [city, stats] of Object.entries(cityStats)) {
+            // Check if valid coordinates exist
+            if (stats.lat !== null && stats.lng !== null && typeof stats.lat === 'number' && typeof stats.lng === 'number') {
+                const lat = parseFloat(stats.lat);
+                const lng = parseFloat(stats.lng);
+                const damagePerc = parseFloat(stats.damage_percentage);
+                
+                // Determine marker color based on damage percentage
+                let markerColor = '#28a745'; // Green (Low)
+                if (damagePerc > 75) markerColor = '#dc3545'; // Red (High)
+                else if (damagePerc > 40) markerColor = '#ffc107'; // Yellow (Medium)
+                
+                // Determine marker radius based on total images (log scale)
+                const radius = 5 + Math.log(stats.total + 1) * 2; // Min radius 5, increases with total images
+                
+                const marker = L.circleMarker([lat, lng], {
+                    radius: radius,
+                    fillColor: markerColor,
+                    color: '#fff',
+                    weight: 1,
+                    opacity: 1,
+                    fillOpacity: 0.7
+                });
+
+                // Create popup content
+                let popupContent = `<h5>${city}</h5>
+                                    <p>Total Images: ${stats.total}<br>
+                                       Damaged: ${stats.total_with_damage} (${damagePerc.toFixed(1)}%)</p>`;
+                if (stats.damage_types) {
+                    popupContent += '<h6>Damage Types:</h6><ul>';
+                    for (const [type, count] of Object.entries(stats.damage_types)) {
+                        popupContent += `<li>${type}: ${count}</li>`;
+                    }
+                    popupContent += '</ul>';
+                }
+                marker.bindPopup(popupContent);
+                
+                markers.addLayer(marker);
+                bounds.extend([lat, lng]);
+                addedMarkers++;
+            } else {
+                console.warn(`Skipping city '${city}' due to invalid coordinates:`, stats.lat, stats.lng);
+            }
+        }
+
+        if (addedMarkers > 0) {
+            map.addLayer(markers);
+            map.fitBounds(bounds.pad(0.1)); // Fit map to markers with padding
+        } else {
+             // Display message if no valid coordinates found
+             document.getElementById('cityMap').innerHTML = '<p class="text-center text-muted p-5">No cities with valid coordinates found to display on the map.</p>';
+        }
+        
+        // --- End Map Logic ---
+
+        // --- Add Table Filter Logic --- 
+        const filterInput = document.getElementById('cityFilterInput');
+        const cityTableBody = document.querySelector('.stats-table tbody');
+        const cityTableRows = cityTableBody ? cityTableBody.querySelectorAll('tr') : [];
+
+        if (filterInput && cityTableBody && cityTableRows.length > 0) {
+            filterInput.addEventListener('keyup', function() {
+                const filterText = filterInput.value.toLowerCase();
+                cityTableRows.forEach(row => {
+                    const cityCell = row.querySelector('td:first-child');
+                    if (cityCell) {
+                        const cityName = cityCell.textContent || cityCell.innerText;
+                        if (cityName.toLowerCase().includes(filterText)) {
+                            row.style.display = ''; // Show row
+                        } else {
+                            row.style.display = 'none'; // Hide row
+                        }
+                    }
+                });
+            });
+        }
+        // --- End Filter Logic ---
+
+    {% endif %}
+
+    // --- Refresh Button Logic --- 
+    const refreshButton = document.getElementById('refresh-data');
+    const loadingOverlay = document.getElementById('loading-overlay');
+    const analyticsContent = document.getElementById('analytics-content');
+
+    if (refreshButton) {
+        refreshButton.addEventListener('click', function() {
+            loadingOverlay.style.display = 'flex';
+            analyticsContent.style.opacity = '0.5';
+            
+            // Use fetch API to call the same route again
+            fetch('{{ url_for("city_analytics") }}', {
+                method: 'GET',
+                headers: {
+                    'X-Requested-With': 'XMLHttpRequest' // Indicate AJAX request
+                }
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.text(); // Get the HTML response as text
+            })
+            .then(html => {
+                // Replace the content of the analytics container
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const newContent = doc.getElementById('analytics-content');
+                if (newContent) {
+                    analyticsContent.innerHTML = newContent.innerHTML;
+                    // Re-initialize any JS dependent things if needed (e.g., map)
+                    // For simplicity, we might just reload the page or re-run map init here
+                    // This example just replaces HTML
+                    console.log("City analytics content refreshed.");
+                } else {
+                     throw new Error('Failed to parse analytics content from response.');
+                }
+            })
+            .catch(error => {
+                console.error('Error refreshing city analytics:', error);
+                // Optionally display an error message to the user
+                alert('Failed to refresh data. Please try again.');
+            })
+            .finally(() => {
+                loadingOverlay.style.display = 'none';
+                analyticsContent.style.opacity = '1';
+            });
+        });
+    }
+    // --- End Refresh Logic --- 
+});
+</script>
+{% endblock %} 

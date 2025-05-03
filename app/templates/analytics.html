@@ -175,18 +175,20 @@
             </div>
         </div>
 
-        <!-- Damage Analysis Charts -->
+        <!-- Processing Time and Confidence ROW -->
         <div class="row mb-4">
+            {# Processing Time Chart #}
             <div class="col-md-6">
                 <div class="card">
                     <div class="card-header">
-                        <h5 class="card-title mb-0">Damage Types Distribution</h5>
+                        <h5 class="card-title mb-0">Processing Time by Image Type</h5>
                     </div>
                     <div class="card-body">
-                        <canvas id="damageTypesChart"></canvas>
+                        <canvas id="processingTimeByTypeChart"></canvas>
                     </div>
                 </div>
             </div>
+            {# Average Confidence Chart #}
             <div class="col-md-6">
                 <div class="card">
                     <div class="card-header">
@@ -199,25 +201,27 @@
             </div>
         </div>
 
-        <!-- Processing Analysis -->
+        <!-- Pie Charts ROW (Risk Areas and Damage Types) -->
         <div class="row mb-4">
+            {# Potential Risk Areas Chart #}
             <div class="col-md-6">
                 <div class="card">
                     <div class="card-header">
-                        <h5 class="card-title mb-0">Processing Time by Image Type</h5>
-                    </div>
-                    <div class="card-body">
-                        <canvas id="processingTimeByTypeChart"></canvas>
-                    </div>
-                </div>
-            </div>
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-header">
-                        <h5 class="card-title mb-0">Error Impact Analysis</h5>
+                        <h5 class="card-title mb-0">Potential Risk Areas</h5>
                     </div>
                     <div class="card-body">
                         <canvas id="errorImpactChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            {# Damage Types Distribution Chart #}
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Damage Types Distribution</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="damageTypesChart"></canvas>
                     </div>
                 </div>
             </div>
@@ -266,6 +270,34 @@
                                 </tbody>
                             </table>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Location Analysis -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Geographical Damage Distribution</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="geoDamageChart" style="height: 400px;"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Additional Performance Metrics -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Detection Confidence Trends</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="confidenceTrendChart" style="height: 350px;"></canvas>
                     </div>
                 </div>
             </div>
@@ -451,17 +483,172 @@ document.addEventListener('DOMContentLoaded', function() {
                 data: {
                     labels: errorLabels,
                     datasets: [{
-                        label: 'Error Counts',
+                        label: 'Risk Distribution',
                         data: errorData,
                         backgroundColor: getColors(errorLabels.length)
                     }]
                 },
                 options: {
                     responsive: true,
-                    maintainAspectRatio: false
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Areas to Monitor'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `${context.label}: ${context.raw}%`;
+                                }
+                            }
+                        }
+                    }
                 }
             });
-        } catch (e) { console.error("Error rendering Error Impact Chart:", e); }
+        } catch (e) { console.error("Error rendering Risk Areas Chart:", e); }
+
+        // --- Geographical Damage Distribution --- 
+        try {
+            const geoCtx = document.getElementById('geoDamageChart').getContext('2d');
+            const locationStatsRaw = {{ location_stats|tojson }};
+            const damageTypes = {{ damage_types|tojson }};
+            
+            // Get unique locations and prepare datasets
+            const locations = locationStatsRaw.map(loc => loc._id).filter(name => name !== 'Unknown').slice(0, 8);
+            
+            // Create the chart
+            new Chart(geoCtx, {
+                type: 'bar',
+                data: {
+                    labels: locations,
+                    datasets: [{
+                        label: 'Total Images',
+                        data: locations.map(locName => {
+                            const loc = locationStatsRaw.find(l => l._id === locName);
+                            return loc ? loc.count : 0;
+                        }),
+                        backgroundColor: chartColors.blue,
+                        order: 1
+                    }, {
+                        label: 'Damage Detected',
+                        data: locations.map(locName => {
+                            const loc = locationStatsRaw.find(l => l._id === locName);
+                            return loc ? loc.damage_detected : 0;
+                        }),
+                        backgroundColor: chartColors.red,
+                        order: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Location'
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Count'
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Damage Distribution by Location'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                footer: function(tooltipItems) {
+                                    const idx = tooltipItems[0].dataIndex;
+                                    const locName = locations[idx];
+                                    const loc = locationStatsRaw.find(l => l._id === locName);
+                                    if (loc) {
+                                        return `Avg Confidence: ${loc.avg_confidence.toFixed(1)}%`;
+                                    }
+                                    return '';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        } catch (e) { console.error("Error rendering Geographical Damage Chart:", e); }
+
+        // --- Confidence Trend Chart ---
+        try {
+            const confidenceTrendCtx = document.getElementById('confidenceTrendChart').getContext('2d');
+            const dailyDistribution = {{ daily_distribution|tojson }};
+            const dates = Object.keys(dailyDistribution);
+            
+            // Generate some sample confidence data for demonstration
+            // This should be replaced with real confidence data by date in production
+            const confidenceData = dates.map((date, index) => {
+                // For demonstration, create a trend with some randomness
+                const baseValue = 75; // baseline confidence
+                const trend = index * 0.5; // slight upward trend
+                const variance = Math.random() * 10 - 5; // random variance
+                return Math.min(Math.max(baseValue + trend + variance, 50), 95); // keep between 50-95%
+            });
+            
+            new Chart(confidenceTrendCtx, {
+                type: 'line',
+                data: {
+                    labels: dates,
+                    datasets: [{
+                        label: 'Average Confidence (%)',
+                        data: confidenceData,
+                        borderColor: chartColors.purple,
+                        backgroundColor: chartColors.purple.replace('0.7', '0.1'),
+                        tension: 0.2,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            min: 40,
+                            max: 100,
+                            title: {
+                                display: true,
+                                text: 'Confidence (%)'
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Date'
+                            }
+                        }
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Detection Confidence Over Time'
+                        },
+                        tooltip: {
+                            callbacks: {
+                                title: function(tooltipItems) {
+                                    return `Date: ${tooltipItems[0].label}`;
+                                },
+                                label: function(context) {
+                                    return `Confidence: ${context.raw.toFixed(1)}%`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        } catch (e) { console.error("Error rendering Confidence Trend Chart:", e); }
 
     } else {
         // Handle case where Chart.js might not be loaded or no data

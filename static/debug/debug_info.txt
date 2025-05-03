@@ -1,0 +1,4 @@
+Latest debug images: debug_20250430_162006
+Generated at: 2025-04-30 16:20:06
+Image type: Potholes
+Number of predictions: 2

@@ -290,8 +290,8 @@ def extract_image_metadata(image_path):
             return _sanitize_for_bson(metadata)
             
     except Exception as e:
-        print(f"[ERROR] Failed to extract metadata: {e}")
-        return {'error': str(e), 'filename': os.path.basename(image_path)}
+        print(f"Error extracting metadata for {image_path}: {e}")
+        return {'error': str(e)} # Return error in metadata
 
 def _convert_to_degrees(value):
     """
@@ -341,41 +341,293 @@ def generate_csv_from_metadata(metadata_list, output_path=None):
     df.to_csv(output_path, index=False)
     return output_path 
 
-def get_location_name(latitude, longitude):
-    """Performs reverse geocoding to get a location name from coordinates."""
-    if latitude is None or longitude is None:
-        return None
-        
+def get_location_name(lat, lon):
+    """
+    Get location name from coordinates using Nominatim geocoder
+    Args:
+        lat: Latitude
+        lon: Longitude
+    Returns:
+        String with formatted location information
+    """
+    if not lat or not lon:
+        return "Unknown Location"
+
     try:
-        # Round coordinates slightly for potentially better caching/grouping
-        lat_str = f"{latitude:.4f}"
-        lon_str = f"{longitude:.4f}"
+        # Use Nominatim to get location info with detailed address
+        geolocator = Nominatim(user_agent="flask_road_damage_detector")
+        location = geolocator.reverse(f"{lat}, {lon}", exactly_one=True, language='en')
         
-        print(f"[DEBUG GEO] Performing reverse lookup for: ({lat_str}, {lon_str})")
-        location = geolocator.reverse((lat_str, lon_str), exactly_one=True, language='en', timeout=5)
-        
-        if location and location.address:
-            # Attempt to parse address for a user-friendly name
-            address_parts = location.address.split(',')
-            if len(address_parts) >= 3:
-                # Try City/Region, Country
-                location_name = f"{address_parts[-3].strip()}, {address_parts[-1].strip()}"
-            elif len(address_parts) > 1:
-                # Fallback to second to last part (often state/region), Country
-                 location_name = f"{address_parts[-2].strip()}, {address_parts[-1].strip()}"
-            else:
-                 location_name = address_parts[-1].strip() # Fallback to Country or full address
-                 
-            print(f"[DEBUG GEO] Geocoding result: {location_name}")
-            return location_name
-        else:
-            print("[DEBUG GEO] No location found by geolocator.")
-            return None
+        if location and location.raw.get('address'):
+            address = location.raw['address']
             
-    except (GeocoderTimedOut, GeocoderServiceError) as geo_err:
-        print(f"[WARN GEO] Geocoding service error for ({lat_str}, {lon_str}): {geo_err}")
-        return None # Return None on service errors
+            # Extract relevant address components
+            road = address.get('road', '')
+            suburb = address.get('suburb', '')
+            city = address.get('city', address.get('town', address.get('village', '')))
+            state = address.get('state', '')
+            country = address.get('country', '')
+            
+            # Construct detailed address
+            location_parts = []
+            if road:
+                location_parts.append(road)
+            if suburb and suburb != road:
+                location_parts.append(suburb)
+            if city and city not in location_parts:
+                location_parts.append(city)
+            if state and state not in location_parts:
+                location_parts.append(state)
+            if country and country not in location_parts:
+                location_parts.append(country)
+            
+            return ", ".join(location_parts)
+        else:
+            return "Coordinates found but no address information available"
+    except GeocoderTimedOut:
+        return "Location lookup timed out"
+    except GeocoderServiceError:
+        return "Location service error"
     except Exception as e:
-        # Catch any other unexpected errors during geocoding
-        print(f"[ERROR GEO] Unexpected geocoding error for ({lat_str}, {lon_str}): {e}")
-        return None 
+        print(f"Error in get_location_name: {e}")
+        return "Error determining location"
+
+def get_location_details(lat, lon, max_retries=3, timeout=10):
+    """
+    Get structured location details from coordinates using Nominatim geocoder
+    with retry logic and fallback options
+    
+    Args:
+        lat: Latitude
+        lon: Longitude
+        max_retries: Maximum number of retries if geocoding fails
+        timeout: Timeout in seconds for geocoding request
+    
+    Returns:
+        Dictionary with structured location information including city, state, and full address
+    """
+    if not lat or not lon:
+        return {
+            "full_address": "Unknown Location",
+            "city": "Unknown",
+            "state": "Unknown",
+            "country": "Unknown",
+            "formatted_address": "Unknown Location"
+        }
+
+    # Try different geocoding services in order
+    geocoding_services = [
+        lambda: _get_location_from_nominatim(lat, lon, max_retries, timeout),
+        lambda: _get_location_from_coordinates(lat, lon)  # Simple fallback using coordinates
+    ]
+    
+    for service in geocoding_services:
+        try:
+            result = service()
+            if result and result.get('city') != 'Unknown':
+                # We found a good result, return it
+                return result
+        except Exception as e:
+            print(f"Geocoding service error: {e}")
+            continue
+    
+    # If all services fail, build a basic result using coordinates
+    return {
+        "full_address": f"Coordinates: {lat}, {lon}",
+        "city": f"Location ({round(float(lat), 4)}, {round(float(lon), 4)})",
+        "state": "Unknown",
+        "country": "Unknown",
+        "latitude": lat,
+        "longitude": lon,
+        "formatted_address": f"Coordinates: {lat}, {lon}"
+    }
+
+def _get_location_from_nominatim(lat, lon, max_retries=3, timeout=10):
+    """
+    Attempts to get location from Nominatim with retries
+    """
+    from geopy.geocoders import Nominatim
+    from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+    import time
+    
+    for attempt in range(max_retries):
+        try:
+            # Use Nominatim to get detailed location info with increasing timeout
+            current_timeout = timeout * (1 + attempt * 0.5)  # Increase timeout with each retry
+            geolocator = Nominatim(user_agent=f"flask_road_damage_detector_retry_{attempt}", timeout=current_timeout)
+            location = geolocator.reverse(f"{lat}, {lon}", exactly_one=True, language='en')
+            
+            if location and location.raw.get('address'):
+                address = location.raw['address']
+                
+                # Extract address components
+                city = address.get('city', address.get('town', address.get('village', 'Unknown')))
+                state = address.get('state', 'Unknown')
+                country = address.get('country', 'Unknown')
+                postal_code = address.get('postcode', '')
+                
+                # Additional location details
+                road = address.get('road', '')
+                suburb = address.get('suburb', '')
+                county = address.get('county', '')
+                district = address.get('state_district', '')
+                
+                # Construct formatted address
+                location_parts = []
+                if road:
+                    location_parts.append(road)
+                if suburb and suburb not in location_parts:
+                    location_parts.append(suburb)
+                if city and city not in location_parts:
+                    location_parts.append(city)
+                if state:
+                    location_parts.append(state)
+                if country:
+                    location_parts.append(country)
+                
+                # If city is still unknown but we have county, use that
+                if city == 'Unknown' and county:
+                    city = county
+                
+                # If city is still unknown but we have district, use that
+                if city == 'Unknown' and district:
+                    city = district
+                
+                formatted_address = ", ".join(location_parts)
+                
+                # Build structured response
+                return {
+                    "full_address": address,
+                    "city": city,
+                    "state": state,
+                    "country": country,
+                    "postal_code": postal_code,
+                    "road": road,
+                    "suburb": suburb,
+                    "county": county,
+                    "district": district,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "formatted_address": formatted_address,
+                    "display_name": location.raw.get('display_name', formatted_address)
+                }
+            else:
+                # Try again if no result was found
+                print(f"No data from Nominatim on attempt {attempt+1}, retrying...")
+                time.sleep(1)  # Brief pause before retry
+                continue
+                
+        except GeocoderTimedOut:
+            print(f"Geocoder timed out for coordinates: {lat}, {lon} (attempt {attempt+1})")
+            time.sleep(2)  # Wait before retry
+            continue
+        except GeocoderServiceError:
+            print(f"Geocoder service error for coordinates: {lat}, {lon} (attempt {attempt+1})")
+            time.sleep(3)  # Longer wait for service errors
+            continue
+        except Exception as e:
+            print(f"Error in geocoding on attempt {attempt+1}: {e}")
+            time.sleep(1)
+            continue
+    
+    # If we got here, all attempts failed
+    return {
+        "full_address": "No address found after retries",
+        "city": "Unknown",
+        "state": "Unknown",
+        "country": "Unknown",
+        "latitude": lat,
+        "longitude": lon,
+        "formatted_address": "Unable to determine location after multiple attempts"
+    }
+
+def _get_location_from_coordinates(lat, lon):
+    """
+    Simple fallback method that just formats the coordinates into a readable form
+    """
+    try:
+        # Round coordinates for display
+        lat_rounded = round(float(lat), 4)
+        lon_rounded = round(float(lon), 4)
+        
+        return {
+            "full_address": f"Coordinates: {lat_rounded}, {lon_rounded}",
+            "city": f"Location ({lat_rounded}, {lon_rounded})",
+            "state": "Unknown",
+            "country": "Unknown",
+            "latitude": lat,
+            "longitude": lon,
+            "formatted_address": f"Coordinates: {lat_rounded}, {lon_rounded}"
+        }
+    except Exception as e:
+        print(f"Error in coordinate fallback: {e}")
+        return None
+
+# --- New function for Video Metadata --- 
+def extract_video_metadata(video_path):
+    """Extracts metadata from a video file using OpenCV."""
+    metadata = {'error': None}
+    try:
+        import cv2
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise IOError(f"Cannot open video file: {video_path}")
+            
+        metadata['frame_width'] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        metadata['frame_height'] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        metadata['fps'] = round(fps, 2) if fps else None
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        metadata['frame_count'] = frame_count
+        if fps and frame_count:
+            duration = frame_count / fps
+            metadata['duration_seconds'] = round(duration, 2)
+            # Format duration as HH:MM:SS
+            td = datetime.timedelta(seconds=duration)
+            metadata['duration_formatted'] = str(td).split('.')[0]
+            
+        # Get codec information (FourCC)
+        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        metadata['codec_fourcc'] = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
+        
+        cap.release()
+        print(f"Successfully extracted video metadata for: {os.path.basename(video_path)}")
+    except ImportError:
+        msg = "OpenCV (cv2) is not installed. Cannot extract video metadata."
+        print(f"ERROR: {msg}")
+        metadata['error'] = msg
+    except Exception as e:
+        msg = f"Error extracting video metadata for {os.path.basename(video_path)}: {e}"
+        print(f"ERROR: {msg}")
+        metadata['error'] = str(e)
+        if 'cap' in locals() and cap.isOpened():
+            cap.release()
+            
+    return metadata
+# --- End Video Metadata function --- 
+
+# --- IoU Calculation Utility --- 
+def calculate_iou(box1, box2):
+    """Calculates Intersection over Union (IoU) between two bounding boxes.
+    Boxes are expected in format [x1, y1, x2, y2].
+    """
+    x1_inter = max(box1[0], box2[0])
+    y1_inter = max(box1[1], box2[1])
+    x2_inter = min(box1[2], box2[2])
+    y2_inter = min(box1[3], box2[3])
+
+    inter_area = max(0, x2_inter - x1_inter) * max(0, y2_inter - y1_inter)
+
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    union_area = box1_area + box2_area - inter_area
+
+    iou = inter_area / union_area if union_area > 0 else 0.0
+    return iou
+# --- End IoU Calculation --- 
+
+# Function to reverse geocode coordinates to get location name
+def get_location_name(lat, lon):
+    # Implementation of the function
+    pass 

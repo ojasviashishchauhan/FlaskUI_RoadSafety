@@ -109,6 +109,132 @@
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
 }
+
+.card-header {
+    padding-bottom: 1rem;  /* Add more padding at bottom of header */
+}
+
+.preview-section {
+    position: relative;
+    padding-bottom: 3.5rem;  /* Space for the status badge */
+    min-height: 200px;
+    display: block;
+    text-decoration: none;
+}
+
+.preview-container {
+    position: relative;
+    height: 200px;
+    background-color: #f8f9fa;
+    overflow: hidden;
+}
+
+.preview-image, .video-thumbnail {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.video-placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: #f8f9fa;
+    position: relative;
+}
+
+.video-placeholder::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.1);
+}
+
+.video-icon {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 3rem;
+    z-index: 2;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.status-container {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 0.75rem;
+    background: linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.6) 100%);
+    display: flex;
+    align-items: center;
+    z-index: 5;
+}
+
+.action-buttons {
+    margin-left: auto;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-weight: 500;
+    font-size: 0.875rem;
+    color: #fff;
+    background-color: #dc3545;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    z-index: 6;
+}
+
+.status-badge.bg-success {
+    background-color: #28a745;
+}
+
+.status-badge.bg-warning {
+    background-color: #ffc107;
+    color: #000;
+}
+
+.status-badge.bg-secondary {
+    background-color: #6c757d;
+}
+
+.status-badge.bg-dark {
+    background-color: #343a40;
+}
+
+.card {
+    position: relative;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(0, 0, 0, 0.125);
+    border-radius: 0.25rem;
+    overflow: hidden;
+}
+
+.card-actions {
+    padding: 0.75rem 1rem;
+    background-color: #fff;
+    border-top: 1px solid rgba(0, 0, 0, 0.125);
+    margin-top: auto;
+}
+
+.btn-group {
+    display: flex;
+    gap: 0.5rem;
+}
 </style>
 {% endblock %}
 
@@ -125,13 +251,18 @@
             <div class="d-flex justify-content-between align-items-center">
                 <h2>Road Damage Analysis</h2>
                 <div>
-                    <a href="{{ url_for('upload') }}" class="btn btn-primary">
+                    <a href="{{ url_for('upload_image') }}" class="btn btn-primary">
                         <i class="fas fa-upload"></i> Upload Images
                     </a>
                     {% if images %}
                     <a href="{{ url_for('export_csv') }}" class="btn btn-outline-secondary ms-2">
                         <i class="fas fa-file-export"></i> Export Data
                     </a>
+                    {% if current_user.is_admin %}
+                    <button type="button" class="btn btn-danger ms-2" data-bs-toggle="modal" data-bs-target="#purgeModal">
+                        <i class="fas fa-trash-alt"></i> Purge All Data
+                    </button>
+                    {% endif %}
                     {% endif %}
                 </div>
             </div>
@@ -157,51 +288,108 @@
             <div class="row">
                 {% for image in images %}
                 <div class="col-md-4 mb-4">
-                    <div class="card h-100">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <small class="text-muted">{{ image.upload_time.strftime('%Y-%m-%d %H:%M:%S') }}</small>
-                            <span class="badge bg-info">{{ image.image_type|title }}</span>
-                        </div>
-                        <a href="{{ url_for('image_details', image_id=image.id) }}">
-                            {% if image.filename %}
-                            <img src="{{ url_for('view_image', filename=image.filename) }}" 
-                                 class="card-img-top" 
-                                 alt="Uploaded Image Preview"
-                                 style="height: 200px; object-fit: cover;"
-                                 onerror="this.style.display='none'; this.onerror=null;">
-                            {% else %}
-                            <div class="card-img-top d-flex align-items-center justify-content-center bg-light" 
-                                 style="height: 200px;">
-                                <span class="text-muted">Processing...</span>
-                            </div>
-                            {% endif %}
-                        </a>
-                        <div class="card-body">
+                    <div class="card">
+                        <div class="card-header">
                             <div class="d-flex justify-content-between align-items-center">
-                                <div>
+                                <small class="text-muted">{{ image.upload_time.strftime('%Y-%m-%d %H:%M:%S') }}</small>
+                                <div class="d-flex align-items-center gap-2">
+                                    {% if image.media_type == 'video' %}
+                                    <span class="badge bg-secondary">Video</span>
+                                    {% else %}
+                                    <span class="badge bg-primary">Image</span>
+                                    {% endif %}
+                                    <span class="badge bg-info">{{ image.image_type|title if image.image_type else 'N/A' }}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="preview-container">
+                            {% if image.media_type == 'video' %}
+                                {% if image.processing_status in ['pending', 'processing'] %}
+                                    <div class="video-placeholder">
+                                        <span class="text-muted">Video Processing...</span>
+                                    </div>
+                                {% else %}
+                                    {% if image.thumbnail_path %}
+                                        <img src="{{ url_for('view_image', filename=image.thumbnail_path.split('/')[-1]) }}"
+                                             class="video-thumbnail"
+                                             alt="Video Thumbnail"
+                                             onerror="this.onerror=null; this.parentElement.innerHTML='<div class=\'video-placeholder\'><i class=\'fas fa-film fa-3x text-muted\'></i></div>';">
+                                        <i class="fas fa-play-circle video-icon"></i>
+                                    {% else %}
+                                        <div class="video-placeholder">
+                                            <i class="fas fa-film fa-3x text-muted"></i>
+                                        </div>
+                                    {% endif %}
+                                {% endif %}
+                            {% else %}
+                                {% set preview_filename = image.annotated_image_path.split('/')[-1] if image.annotated_image_path else image.filename %}
+                                {% if preview_filename %}
+                                    <img src="{{ url_for('view_image', filename=preview_filename) }}" 
+                                         class="preview-image" 
+                                         alt="Image Preview"
+                                         onerror="this.onerror=null; this.src='{{ url_for('static', filename='img/placeholder.png') }}';">
+                                {% elif image.processing_status in ['pending', 'processing'] %}
+                                    <div class="video-placeholder">
+                                        <span class="text-muted">Processing...</span>
+                                    </div>
+                                {% else %}
+                                    <div class="video-placeholder">
+                                        <span class="text-muted">Preview N/A</span>
+                                    </div>
+                                {% endif %}
+                            {% endif %}
+
+                            <div class="status-container">
+                                <div class="status-badge {% if not image.prediction_results.get('damage_detected', False) %}bg-success{% endif %}">
                                     {% if image.processing_status == 'completed' %}
                                         {% if image.prediction_results.get('damage_detected', False) %}
-                                            <span class="badge bg-danger">Damage Detected</span>
-                                            {% if image.confidence_score is not none %}
-                                                <small class="text-muted ms-1">({{ "%.1f"|format(image.confidence_score * 100) }}%)</small>
+                                            {% if image.media_type == 'video' %}
+                                                {% set damage_count = image.prediction_results.get('unique_damage_count', 0) %}
+                                                {% set raw_detections = image.prediction_results.get('total_raw_detections', 0) %}
+                                                <span class="badge bg-danger">
+                                                    Damage Detected 
+                                                    {% if damage_count > 0 %}({{ damage_count }} tracked){% endif %}
+                                                </span>
+                                            {% else %}
+                                                {% set damage_type = image.prediction_results.get('raw_predictions', [])[0].class_name if image.prediction_results.get('raw_predictions') else 'Damage' %}
+                                                <span class="badge bg-danger">
+                                                    {{ damage_type|title }}
+                                                    {% if image.confidence_score is not none %}
+                                                        ({{ "%.1f"|format(image.confidence_score * 100) }}%)
+                                                    {% endif %}
+                                                </span>
                                             {% endif %}
                                         {% else %}
                                             <span class="badge bg-success">No Damage</span>
                                         {% endif %}
                                     {% elif image.processing_status == 'processing' %}
-                                        <span class="badge bg-warning text-dark">Processing...</span>
+                                        <span class="bg-warning">Processing...</span>
                                     {% elif image.processing_status == 'pending' %}
-                                         <span class="badge bg-secondary">Pending...</span>
+                                        <span class="bg-secondary">Pending...</span>
                                     {% elif image.processing_status == 'failed' %}
-                                        <span class="badge bg-dark">Failed</span>
-                                        <small class="text-danger ms-1">{{ image.error_message|truncate(30) }}</small>
-                                    {% else %}
-                                         <span class="badge bg-secondary">{{ image.processing_status|title }}</span>
+                                        <span class="bg-dark" title="{{ image.error_message }}">Failed</span>
                                     {% endif %}
                                 </div>
+                                <div class="action-buttons">
+                                    <a href="{{ url_for('image_details', image_id=image.id) }}" 
+                                       class="btn btn-sm btn-light">
+                                        <i class="fas fa-info-circle"></i>
+                                    </a>
+                                    <button type="button" 
+                                            class="btn btn-sm btn-light"
+                                            onclick="confirmDelete('{{ image.id }}', '{{ view }}')">
+                                        <i class="fas fa-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="card-actions">
+                            <div class="d-flex justify-content-end">
                                 <div class="btn-group">
                                     <a href="{{ url_for('image_details', image_id=image.id) }}" 
-                                       class="btn btn-sm btn-outline-primary">
+                                       class="btn btn-sm btn-outline-primary details-button">
                                         <i class="fas fa-info-circle"></i> Details
                                     </a>
                                     <button type="button" 
@@ -225,6 +413,7 @@
                         <tr>
                             <th>Preview</th>
                             <th>Type</th>
+                            <th>Media</th>
                             <th>Upload Time</th>
                             <th>Status</th>
                             <th>Detection Result</th>
@@ -236,47 +425,71 @@
                     </thead>
                     <tbody>
                         {% for image in images %}
-                        <tr>
+                        <tr id="row-{{ image.id }}">
                             <td>
-                                <a href="{{ url_for('image_details', image_id=image.id) }}">
-                                    {% if image.filename %}
-                                    <img src="{{ url_for('view_image', filename=image.filename) }}" 
-                                         alt="Preview" 
-                                         style="height: 50px; width: 50px; object-fit: cover;"
-                                         onerror="this.style.display='none'; this.onerror=null;">
-                                    {% else %}
-                                    <div class="d-flex align-items-center justify-content-center bg-light" 
-                                         style="height: 50px; width: 50px;">
-                                        <small class="text-muted">Proc...</small>
-                                    </div>
-                                    {% endif %}
-                                </a>
+                                {# Video Placeholder/Icon #}
+                                {% if image.media_type == 'video' %}
+                                     <div class="d-flex align-items-center justify-content-center bg-light" 
+                                          style="height: 50px; width: 50px;">
+                                          {% if image.processing_status in ['pending', 'processing'] %}
+                                             <small class="text-muted">Proc...</small>
+                                          {% else %}
+                                             <i class="fas fa-film text-muted"></i> {# Video Icon #}
+                                          {% endif %}
+                                     </div>
+                                {# Image Preview #}
+                                {% else %}
+                                     {% set preview_filename = image.annotated_image_path.split('/')[-1] if image.annotated_image_path else image.filename %}
+                                     {% if preview_filename %}
+                                     <img src="{{ url_for('view_image', filename=preview_filename) }}" 
+                                          alt="Preview" 
+                                          style="height: 50px; width: 50px; object-fit: cover;"
+                                          onerror="this.onerror=null; this.src='{{ url_for('static', filename='img/placeholder.png') }}';">
+                                     {% elif image.processing_status in ['pending', 'processing'] %}
+                                     <div class="d-flex align-items-center justify-content-center bg-light" 
+                                          style="height: 50px; width: 50px;">
+                                          <small class="text-muted">Proc...</small>
+                                     </div>
+                                     {% else %}
+                                      <div class="d-flex align-items-center justify-content-center bg-light" 
+                                          style="height: 50px; width: 50px;">
+                                          <small class="text-muted">N/A</small>
+                                      </div>
+                                     {% endif %}
+                                {% endif %}
                             </td>
-                            <td><span class="badge bg-info">{{ image.image_type|title }}</span></td>
+                            <td><span class="badge bg-info">{{ image.image_type|title if image.image_type else 'N/A' }}</span></td>
+                            {# Media Type Cell #}
+                            <td>
+                                {% if image.media_type == 'video' %}
+                                <span class="badge bg-secondary">Video</span>
+                                {% else %}
+                                <span class="badge bg-primary">Image</span>
+                                {% endif %}
+                            </td>
                             <td>{{ image.upload_time.strftime('%Y-%m-%d %H:%M:%S') }}</td>
                             <td>
-                                {% if image.processing_status == 'completed' %}
-                                    <span class="badge bg-success">Complete</span>
-                                {% elif image.processing_status == 'processing' %}
-                                    <span class="badge bg-warning text-dark">Processing...</span>
-                                {% elif image.processing_status == 'pending' %}
-                                     <span class="badge bg-secondary">Pending</span>
-                                {% elif image.processing_status == 'failed' %}
-                                    <span class="badge bg-dark">Failed</span>
-                                {% else %}
-                                    <span class="badge bg-secondary">{{ image.processing_status|title }}</span>
-                                {% endif %}
+                                <span class="status-badge badge">{# Status updated by JS #}</span> 
                             </td>
                             <td>
                                 {% if image.processing_status == 'completed' %}
                                     {% if image.prediction_results.get('damage_detected', False) %}
-                                        {% set damage_type = image.prediction_results.get('raw_predictions', [])[0].label if image.prediction_results.get('raw_predictions') else 'Damage' %}
-                                        <span class="badge bg-danger">
-                                            {{ damage_type|title }}
-                                            {% if image.confidence_score is not none %}
-                                                ({{ "%.1f"|format(image.confidence_score * 100) }}%)
-                                            {% endif %}
-                                        </span>
+                                        {% if image.media_type == 'video' %}
+                                            {% set damage_count = image.prediction_results.get('unique_damage_count', 0) %}
+                                            {% set raw_detections = image.prediction_results.get('total_raw_detections', 0) %}
+                                            <span class="badge bg-danger">
+                                                Damage Detected 
+                                                {% if damage_count > 0 %}({{ damage_count }} tracked){% endif %}
+                                            </span>
+                                        {% else %}
+                                            {% set damage_type = image.prediction_results.get('raw_predictions', [])[0].class_name if image.prediction_results.get('raw_predictions') else 'Damage' %}
+                                            <span class="badge bg-danger">
+                                                {{ damage_type|title }}
+                                                {% if image.confidence_score is not none %}
+                                                    ({{ "%.1f"|format(image.confidence_score * 100) }}%)
+                                                {% endif %}
+                                            </span>
+                                        {% endif %}
                                     {% else %}
                                         <span class="badge bg-success">No Damage</span>
                                     {% endif %}
@@ -316,7 +529,7 @@
         </div>
         <h4 class="text-muted">No images analyzed yet</h4>
         <p class="text-muted mb-4">Upload road images to start detecting damage</p>
-        <a href="{{ url_for('upload') }}" class="btn btn-primary">
+        <a href="{{ url_for('upload_image') }}" class="btn btn-primary">
             <i class="fas fa-upload"></i> Upload Images
         </a>
     </div>
@@ -332,6 +545,41 @@
         </form>
     </div>
 </div>
+
+<!-- Add this at the end of the file, before the final script tag -->
+{% if current_user.is_admin %}
+<!-- Purge Confirmation Modal -->
+<div class="modal fade" id="purgeModal" tabindex="-1" aria-labelledby="purgeModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title" id="purgeModalLabel"><i class="fas fa-exclamation-triangle"></i> Purge All Data</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="fw-bold text-danger">WARNING: This action cannot be undone!</p>
+                <p>You are about to delete ALL images and videos from the system. This includes:</p>
+                <ul>
+                    <li>All image files and video files on the server</li>
+                    <li>All associated analysis and metadata</li>
+                    <li>All user-uploaded content (across all users)</li>
+                </ul>
+                <p>Please type "PURGE ALL DATA" in the field below to confirm:</p>
+                <input type="text" id="purgeConfirmText" class="form-control" placeholder="Type PURGE ALL DATA here">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <form id="purgeForm" action="{{ url_for('purge_all_data') }}" method="POST">
+                    <button type="submit" id="purgeConfirmButton" class="btn btn-danger" disabled>
+                        <i class="fas fa-trash-alt"></i> Confirm Purge
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -371,23 +619,159 @@
         fetch('/check_processing_status')
             .then(response => response.json())
             .then(data => {
-                const processingCount = data.processing_count || 0;
-                document.getElementById('processingCount').textContent = processingCount;
-                
-                // Show/hide delete button based on processing count
-                const deleteButton = document.getElementById('deleteStuckButton');
-                if (deleteButton) {
-                    deleteButton.style.display = processingCount > 0 ? 'inline-block' : 'none';
+                if (data.error) {
+                    console.error('Status check error:', data.error);
+                    return;
                 }
-                
-                if (processingCount > 0) {
+
+                const processingItems = data.processing_items || [];
+                const finishedItems = data.recently_finished_items || [];
+                const processingCount = processingItems.length;
+                const allComplete = data.all_processing_complete || false;
+
+                // Update overall count (if element exists)
+                const countElement = document.getElementById('processingCount');
+                if (countElement) {
+                    countElement.textContent = processingCount;
+                }
+
+                // Update cards for processing items (optional: show progress)
+                processingItems.forEach(item => {
+                    const card = document.getElementById(`card-${item.id}`);
+                    if (card) {
+                        // Find status badge within card
+                        const statusBadge = card.querySelector('.status-badge'); 
+                        if (statusBadge) {
+                            statusBadge.className = 'status-badge badge bg-warning text-dark'; // Set class directly
+                            statusBadge.textContent = 'Processing...';
+                        }
+                         // You could update a progress bar here if needed: item.progress
+                    }
+                });
+
+                // Update cards for finished items
+                finishedItems.forEach(item => {
+                    const card = document.getElementById(`card-${item.id}`);
+                    if (card) {
+                        // Update based on final status
+                        updateCardContent(card, item);
+                    }
+                });
+
+                // Poll again only if there are still items actively processing
+                // Use the all_processing_complete flag from backend
+                if (!allComplete) {
                     setTimeout(checkProcessingStatus, 5000); // Check again in 5 seconds
+                } else {
+                    console.log('All processing complete, stopping status checks');
                 }
             })
-            .catch(error => console.error('Error:', error));
+            .catch(error => {
+                console.error('Fetch Error during status check:', error);
+                // Maybe add a longer timeout before retrying if fetch fails
+                setTimeout(checkProcessingStatus, 15000); 
+            });
     }
 
-    // Start checking when page loads
-    document.addEventListener('DOMContentLoaded', checkProcessingStatus);
+    function updateCardContent(cardElement, itemData) {
+        // Find status badge in its NEW location
+        const statusOverlay = cardElement.querySelector('.status-overlay');
+        const previewContainer = cardElement.querySelector('.preview-container'); 
+        const detailsButton = cardElement.querySelector('.details-button');
+
+        if (detailsButton) { // Update details link
+            detailsButton.href = `/image/${itemData.id}`; 
+        }
+        
+        // Update Status Overlay Content
+        if (statusOverlay) {
+            let statusHtml = '';
+            if (itemData.status === 'completed') {
+                if (itemData.damage_detected) {
+                    statusHtml = '<span class="status-badge badge bg-danger">Damage Detected';
+                    if (itemData.confidence_score !== null) {
+                        statusHtml += ` (${(itemData.confidence_score * 100).toFixed(1)}%)`;
+                    }
+                     statusHtml += '</span>';
+                } else {
+                    statusHtml = '<span class="status-badge badge bg-success">No Damage</span>';
+                }
+            } else if (itemData.status === 'processing') {
+                 statusHtml = '<span class="status-badge badge bg-warning text-dark">Processing...</span>';
+            } else if (itemData.status === 'pending') {
+                 statusHtml = '<span class="status-badge badge bg-secondary">Pending...</span>';
+            } else if (itemData.status === 'failed') {
+                statusHtml = `<span class="status-badge badge bg-dark" title="${itemData.error_message || ''}">Failed</span>`;
+            }
+            statusOverlay.innerHTML = statusHtml;
+        }
+
+        // Update Preview Area (only if status is completed/failed)
+        if (previewContainer && itemData.status !== 'processing' && itemData.status !== 'pending') {
+            if (itemData.media_type === 'video') {
+                // Show a generic video icon for completed videos
+                previewContainer.innerHTML = '<div class="card-img-top d-flex align-items-center justify-content-center bg-light" style="height: 200px;"><i class="fas fa-video fa-3x text-muted"></i></div>'; 
+            } else if (itemData.annotated_path) {
+                // Update image preview to annotated version
+                const imgElement = previewContainer.querySelector('img');
+                const imageUrl = `/image/view/${itemData.annotated_path}`; // Use view_image endpoint
+                if (imgElement) {
+                    imgElement.src = imageUrl;
+                    imgElement.alt = 'Annotated Image';
+                    imgElement.style.display = 'block'; // Ensure it's visible
+                } else {
+                     // If no img tag was present (e.g., was processing), create one
+                     previewContainer.innerHTML = `<img src="${imageUrl}" class="card-img-top" alt="Annotated Image" style="height: 200px; object-fit: cover;" onerror="this.style.display='none'; this.onerror=null;">`;
+                }
+            } else {
+                 // Completed but no annotated path (shouldn't happen often)
+                 previewContainer.innerHTML = '<div class="card-img-top d-flex align-items-center justify-content-center bg-light" style="height: 200px;"><span class="text-muted">Completed</span></div>';
+            }
+        }
+    }
+
+    // Assign IDs to cards and elements needed for updates
+    document.addEventListener('DOMContentLoaded', () => {
+        document.querySelectorAll('.card.h-100').forEach(card => {
+            const detailsLink = card.querySelector('a.details-button');
+            if (detailsLink) {
+                const urlParts = detailsLink.href.split('/');
+                const imageId = urlParts[urlParts.length - 1];
+                card.id = `card-${imageId}`;
+                // Add class to status badge parent for easier selection
+                const statusElement = card.querySelector('.badge'); // Find first badge
+                if (statusElement) {
+                     statusElement.classList.add('status-badge'); 
+                }
+                 // Add class to preview container
+                 const previewDiv = card.querySelector('.card-img-top');
+                 if (previewDiv) {
+                     previewDiv.classList.add('preview-container');
+                 } else {
+                      // Find the parent link if img is direct child
+                     const previewLink = card.querySelector('a[href*="/image/"]'); 
+                     if(previewLink && !previewLink.classList.contains('details-button')){
+                         previewLink.classList.add('preview-container');
+                     }
+                 }
+            }
+        });
+        // Start polling after assigning IDs
+        checkProcessingStatus();
+    });
+
+    {% if current_user.is_admin %}
+    // Purge confirmation handling
+    document.addEventListener('DOMContentLoaded', function() {
+        const purgeConfirmText = document.getElementById('purgeConfirmText');
+        const purgeConfirmButton = document.getElementById('purgeConfirmButton');
+        
+        if (purgeConfirmText && purgeConfirmButton) {
+            purgeConfirmText.addEventListener('input', function() {
+                purgeConfirmButton.disabled = purgeConfirmText.value !== 'PURGE ALL DATA';
+            });
+        }
+    });
+    {% endif %}
 </script>
 {% endblock %} 

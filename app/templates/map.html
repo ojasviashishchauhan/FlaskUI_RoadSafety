@@ -3,9 +3,7 @@
 {% block title %}Map View - RoadAISafety{% endblock %}
 
 {% block styles %}
-<!-- OpenLayers CSS -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/openlayers/openlayers.github.io@master/en/v6.15.1/css/ol.css" type="text/css">
-
+{{ super() }}
 <style>
     #map {
         height: 600px;
@@ -13,208 +11,349 @@
         border-radius: 8px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .disclaimer {
-        font-size: 0.8rem;
-        color: #666;
+    .controls {
         margin-bottom: 1rem;
     }
-    .popup-content {
-        text-align: center;
-        max-width: 200px;
+    .legend {
+        background: white;
+        padding: 10px;
+        border-radius: 5px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.2);
     }
-    .popup-content img {
+    .legend-item {
+        display: flex;
+        align-items: center;
+        margin-bottom: 5px;
+    }
+    .legend-color {
+        width: 20px;
+        height: 20px;
+        margin-right: 8px;
+        border-radius: 50%;
+    }
+    .image-popup {
+        max-width: 250px;
+    }
+    .image-popup img {
         max-width: 100%;
         height: auto;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
         border-radius: 4px;
     }
-    .ol-popup {
-        position: absolute;
-        background-color: white;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.2);
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #cccccc;
-        bottom: 12px;
-        left: -50px;
-        min-width: 280px;
-        display: none;
+    .image-info {
+        font-size: 14px;
+        margin-bottom: 8px;
     }
-    .ol-popup.visible {
-        display: block;
+    .image-buttons {
+        display: flex;
+        justify-content: space-between;
     }
-    .ol-popup:after, .ol-popup:before {
-        top: 100%;
-        border: solid transparent;
-        content: " ";
-        height: 0;
-        width: 0;
-        position: absolute;
-        pointer-events: none;
-    }
-    .ol-popup:after {
-        border-top-color: white;
-        border-width: 10px;
-        left: 48px;
-        margin-left: -10px;
-    }
-    .ol-popup:before {
-        border-top-color: #cccccc;
-        border-width: 11px;
-        left: 48px;
-        margin-left: -11px;
+    .loading-indicator {
+        text-align: center;
+        padding: 20px;
+        font-size: 18px;
     }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="container">
-    <h2 class="mb-3">Image Locations</h2>
-    <p class="disclaimer">Note: This map uses ISRO's Bhuvan service and follows Survey of India guidelines.</p>
+<div class="container-fluid mt-4">
+    <div class="row mb-3">
+        <div class="col-md-8">
+            <h2>Media Location Map</h2>
+        </div>
+        <div class="col-md-4 text-md-end">
+            <a href="{{ url_for('city_analytics') }}" class="btn btn-primary">
+                <i class="fas fa-table me-2"></i> View City Analytics
+            </a>
+        </div>
+    </div>
     
     {% if not images %}
     <div class="alert alert-info">
-        No images with location data available.
+        <h4 class="alert-heading">No Images or Videos with Location Data</h4>
+        <p>There are currently no media with location data available to display on the map.</p>
+        <hr>
+        <p class="mb-0">Upload images or videos with GPS metadata to see them displayed here.</p>
+        <a href="{{ url_for('upload_image') }}" class="btn btn-primary mt-3">Upload Images</a>
+        <a href="{{ url_for('upload_video') }}" class="btn btn-outline-primary mt-3">Upload Videos</a>
+    </div>
+    {% else %}
+    <div class="row mb-3">
+        <div class="col-md-9">
+            <div class="form-group">
+                <label for="damage-filter">Filter by damage type:</label>
+                <select id="damage-filter" class="form-control">
+                    <option value="all">All Items</option>
+                    <option value="Potholes">Potholes</option>
+                    <option value="Longitudinal">Longitudinal Cracks</option>
+                    <option value="Transverse">Transverse Cracks</option>
+                    <option value="Alligator">Alligator Cracks</option>
+                    <option value="Edge">Edge Cracks</option>
+                    <option value="Reflection">Reflection Cracks</option>
+                </select>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="form-group">
+                <label for="media-filter">Media type:</label>
+                <select id="media-filter" class="form-control">
+                    <option value="all">All Media</option>
+                    <option value="image">Images Only</option>
+                    <option value="video">Videos Only</option>
+                </select>
+            </div>
+        </div>
+    </div>
+    
+    <div id="map" style="height: 600px; width: 100%;">
+        <div class="loading-indicator">
+            <i class="fas fa-spinner fa-spin"></i> Loading map...
+        </div>
     </div>
     {% endif %}
-    
-    <div id="map"></div>
-    <div id="popup" class="ol-popup">
-        <div id="popup-content"></div>
-    </div>
 </div>
-{% endblock %}
 
-{% block scripts %}
-<!-- OpenLayers JavaScript -->
-<script src="https://cdn.jsdelivr.net/gh/openlayers/openlayers.github.io@master/en/v6.15.1/build/ol.js"></script>
-
+{% if images %}
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    // Create the popup overlay
-    var container = document.getElementById('popup');
-    var content = document.getElementById('popup-content');
-    var overlay = new ol.Overlay({
-        element: container,
-        autoPan: true,
-        autoPanAnimation: {
-            duration: 250
-        }
-    });
+// Create an array to store the image data
+const imageData = [];
 
-    // Define the extent for India (including disputed territories)
-    var indiaExtent = ol.proj.transformExtent([68.1766, 6.2325, 97.4025, 37.5], 'EPSG:4326', 'EPSG:3857');
-
-    // Create the map with Bhuvan WMS layer
-    var map = new ol.Map({
-        target: 'map',
-        overlays: [overlay],
-        layers: [
-            new ol.layer.Tile({
-                source: new ol.source.TileWMS({
-                    url: '/bhuvan-proxy',
-                    params: {
-                        'LAYERS': 'india3',
-                        'FORMAT': 'image/png',
-                        'TRANSPARENT': true
-                    },
-                    serverType: 'geoserver',
-                    crossOrigin: 'anonymous',
-                    projection: 'EPSG:4326',
-                    tileGrid: new ol.tilegrid.TileGrid({
-                        extent: [-180, -90, 180, 90],
-                        resolutions: Array.from({length: 19}, (_, i) => 360 / (256 * Math.pow(2, i))),
-                        tileSize: [256, 256],
-                        origin: [-180, 90]
-                    })
-                })
-            })
-        ],
-        view: new ol.View({
-            center: ol.proj.fromLonLat([78.9629, 20.5937]), // Center of India
-            zoom: 5,
-            minZoom: 4,
-            maxZoom: 18,
-            extent: indiaExtent,
-            constrainOnlyCenter: true
-        })
-    });
-
-    // Add markers for images
-    var features = [];
-    {% for image in images %}
-        {% if image.metadata and image.metadata.gps_latitude and image.metadata.gps_longitude %}
-            var feature = new ol.Feature({
-                geometry: new ol.geom.Point(
-                    ol.proj.fromLonLat([{{ image.metadata.gps_longitude }}, {{ image.metadata.gps_latitude }}])
-                ),
-                name: "{{ image.filename }}",
-                image_id: "{{ image._id }}"
-            });
-            features.push(feature);
-        {% endif %}
-    {% endfor %}
-
-    // Create vector source and layer for markers
-    var vectorSource = new ol.source.Vector({
-        features: features
-    });
-
-    var vectorLayer = new ol.layer.Vector({
-        source: vectorSource,
-        style: new ol.style.Style({
-            image: new ol.style.Circle({
-                radius: 8,
-                fill: new ol.style.Fill({color: '#3388ff'}),
-                stroke: new ol.style.Stroke({color: '#fff', width: 2})
-            })
-        })
-    });
-
-    map.addLayer(vectorLayer);
-
-    // Add click handler for features
-    map.on('click', function(evt) {
-        var feature = map.forEachFeatureAtPixel(evt.pixel, function(feature) {
-            return feature;
-        });
-
-        if (feature) {
-            var coordinates = feature.getGeometry().getCoordinates();
-            var popupContent = '<div class="popup-content">' +
-                '<p>' + feature.get('name') + '</p>' +
-                '<a href="/image/' + feature.get('image_id') + '" class="btn btn-sm btn-primary">View Details</a>' +
-                '</div>';
-            
-            content.innerHTML = popupContent;
-            container.classList.add('visible');
-            overlay.setPosition(coordinates);
-        } else {
-            container.classList.remove('visible');
-            overlay.setPosition(undefined);
-        }
-    });
-
-    // Change mouse cursor when over marker
-    map.on('pointermove', function(e) {
-        if (e.dragging) return;
+// Process the image data for use in the map
+{% for image in images %}
+    // Check if location data exists and has valid coordinates
+    {% if image.location %}
+        // Extract the latitude and longitude
+        {% set lat = image.location.get('latitude') %}
+        {% set lng = image.location.get('longitude') %}
         
-        var pixel = map.getEventPixel(e.originalEvent);
-        var hit = map.hasFeatureAtPixel(pixel);
-        var mapElement = map.getTargetElement();
-        if (mapElement) {
-            mapElement.style.cursor = hit ? 'pointer' : '';
-        }
-    });
+        // Only add items with valid coordinates
+        {% if lat and lng %}
+            imageData.push({
+                id: "{{ image.id }}",
+                latitude: {{ lat }},
+                longitude: {{ lng }},
+                filename: "{{ image.filename or '' }}",
+                original_filename: "{{ image.original_filename or image.filename or '' }}",
+                damage_type: "{{ image.image_type or 'Unknown' }}",
+                upload_time: "{{ image.upload_time.strftime('%Y-%m-%d %H:%M') if image.upload_time else 'Unknown' }}",
+                annotated_path: "{{ image.annotated_image_path or '' }}",
+                address: "{{ image.location.get('formatted_address') or image.location.get('address') or 'Unknown location' }}",
+                city: "{{ image.location.get('city') or 'Unknown city' }}",
+                state: "{{ image.location.get('state') or 'Unknown state' }}",
+                media_type: "{{ image.media_type or 'image' }}"
+            });
+        {% endif %}
+    {% endif %}
+{% endfor %}
 
-    // Fit to markers if they exist
-    if (features.length > 0) {
-        var extent = vectorSource.getExtent();
-        map.getView().fit(extent, {
-            padding: [50, 50, 50, 50],
-            maxZoom: 12
+// Define the map initialization function called by the Google Maps API
+function initMap() {
+    console.log("Map initialization started");
+    console.log("Total items with location data:", imageData.length);
+    
+    // Default center (India)
+    const indiaCenter = { lat: 20.5937, lng: 78.9629 };
+    
+    // Create the map centered on India
+    const map = new google.maps.Map(document.getElementById("map"), {
+        zoom: 5, // Zoom level to show all of India
+        center: indiaCenter,
+        mapTypeId: "roadmap",
+        mapTypeControl: true,
+        streetViewControl: false
+    });
+    
+    // Create info window for markers
+    const infoWindow = new google.maps.InfoWindow();
+    
+    // Array to store all markers
+    const markers = [];
+    
+    // Create markers for each item
+    imageData.forEach(item => {
+        // Validate coordinates
+        const lat = parseFloat(item.latitude);
+        const lng = parseFloat(item.longitude);
+        
+        if (isNaN(lat) || isNaN(lng)) {
+            console.error("Invalid coordinates:", item);
+            return; // Skip this item
+        }
+        
+        // Determine marker color based on damage type
+        let markerColor = "#999999"; // Default gray
+        switch(item.damage_type) {
+            case 'Potholes': markerColor = '#FF0000'; break; // Red
+            case 'Longitudinal': markerColor = '#0000FF'; break; // Blue
+            case 'Transverse': markerColor = '#008000'; break; // Green
+            case 'Alligator': markerColor = '#FFA500'; break; // Orange
+            case 'Edge': markerColor = '#800080'; break; // Purple
+            case 'Reflection': markerColor = '#FFFF00'; break; // Yellow
+        }
+        
+        // Use standard pin marker for images and custom icon for videos
+        let markerOptions;
+        if (item.media_type === 'video') {
+            // Custom video marker (camera icon)
+            markerOptions = {
+                position: { lat: lat, lng: lng },
+                map: map,
+                title: item.original_filename,
+                icon: {
+                    path: "M 0,0 C -2,-20 -10,-22 -10,-30 A 10,10 0 1,1 10,-30 C 10,-22 2,-20 0,0 z M -2,-30 a 2,2 0 1,1 4,0 2,2 0 1,1 -4,0",
+                    fillColor: markerColor,
+                    fillOpacity: 1,
+                    strokeColor: '#000',
+                    strokeWeight: 1,
+                    scale: 1,
+                    labelOrigin: new google.maps.Point(0, -30)
+                }
+            };
+        } else {
+            // Standard pin marker for images
+            markerOptions = {
+                position: { lat: lat, lng: lng },
+                map: map,
+                title: item.original_filename,
+                icon: {
+                    path: "M 0,0 C -2,-20 -10,-22 -10,-30 A 10,10 0 1,1 10,-30 C 10,-22 2,-20 0,0 z M -2,-30 a 2,2 0 1,1 4,0 2,2 0 1,1 -4,0",
+                    fillColor: markerColor,
+                    fillOpacity: 1,
+                    strokeColor: '#000',
+                    strokeWeight: 1,
+                    scale: 1,
+                    labelOrigin: new google.maps.Point(0, -30)
+                }
+            };
+        }
+        
+        // Create the marker
+        const marker = new google.maps.Marker(markerOptions);
+        
+        // Store additional data for filtering
+        marker.damage_type = item.damage_type;
+        marker.media_type = item.media_type;
+        
+        // Add click listener to show info window
+        marker.addListener('click', () => {
+            // Create info window content
+            let imageUrl;
+            if (item.media_type === 'video') {
+                imageUrl = '/static/images/video-thumbnail.png';
+            } else {
+                if (item.annotated_path) {
+                    const filename = item.annotated_path.split('/').pop();
+                    imageUrl = `/image/view_annotated/${filename}`;
+                } else if (item.filename) {
+                    imageUrl = `/image/view/${item.filename}`;
+                } else {
+                    imageUrl = '/static/images/placeholder.png';
+                }
+            }
+            
+            const mediaType = item.media_type === 'video' ? 'Video' : 'Image';
+            
+            const content = `
+                <div class="image-popup">
+                    <img src="${imageUrl}" alt="${item.original_filename}" onerror="this.src='/static/images/placeholder.png'">
+                    <div class="image-info">
+                        <strong>${item.original_filename}</strong><br>
+                        Type: ${mediaType}<br>
+                        Damage Type: ${item.damage_type}<br>
+                        Location: ${item.city}, ${item.state}<br>
+                        Address: ${item.address}<br>
+                        Uploaded: ${item.upload_time}
+                    </div>
+                    <div class="image-buttons">
+                        <a href="/image/${item.id}" class="btn btn-sm btn-primary">View Details</a>
+                    </div>
+                </div>
+            `;
+            
+            infoWindow.setContent(content);
+            infoWindow.open(map, marker);
+        });
+        
+        // Store marker for filtering
+        markers.push(marker);
+    });
+    
+    // Add legend to map
+    addLegend(map);
+    
+    // Setup filtering functionality
+    const damageFilter = document.getElementById('damage-filter');
+    const mediaFilter = document.getElementById('media-filter');
+    
+    if (damageFilter && mediaFilter) {
+        damageFilter.addEventListener('change', filterMarkers);
+        mediaFilter.addEventListener('change', filterMarkers);
+    }
+    
+    // Function to filter markers based on dropdown selections
+    function filterMarkers() {
+        const selectedDamageType = damageFilter.value;
+        const selectedMediaType = mediaFilter.value;
+        
+        markers.forEach(marker => {
+            const damageMatch = selectedDamageType === 'all' || marker.damage_type === selectedDamageType;
+            const mediaMatch = selectedMediaType === 'all' || marker.media_type === selectedMediaType;
+            
+            marker.setVisible(damageMatch && mediaMatch);
         });
     }
-});
+    
+    // Function to add legend to map
+    function addLegend(map) {
+        const legend = document.createElement('div');
+        legend.className = 'legend';
+        
+        let legendContent = `
+            <h6 class="mb-2">Legend</h6>
+            <div class="legend-item mb-3">
+                <div style="display: flex; align-items: center; margin-right: 15px;">
+                    <div style="height: 24px; width: 12px; background-size: contain; background-repeat: no-repeat; background-image: url('data:image/svg+xml;utf8,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;24&quot; height=&quot;24&quot;><path fill=&quot;%23999&quot; stroke=&quot;%23000&quot; d=&quot;M 0,0 C -2,-20 -10,-22 -10,-30 A 10,10 0 1,1 10,-30 C 10,-22 2,-20 0,0 z&quot;/></svg>'); margin-right: 8px;"></div>
+                    <span>Image</span>
+                </div>
+                <div style="display: flex; align-items: center;">
+                    <div style="height: 24px; width: 12px; background-size: contain; background-repeat: no-repeat; background-image: url('data:image/svg+xml;utf8,<svg xmlns=&quot;http://www.w3.org/2000/svg&quot; width=&quot;24&quot; height=&quot;24&quot;><path fill=&quot;%23999&quot; stroke=&quot;%23000&quot; d=&quot;M 0,0 C -2,-20 -10,-22 -10,-30 A 10,10 0 1,1 10,-30 C 10,-22 2,-20 0,0 z&quot;/></svg>'); margin-right: 8px;"></div>
+                    <span>Video</span>
+                </div>
+            </div>
+            <h6 class="mb-2">Damage Types</h6>
+        `;
+        
+        const damageTypes = [
+            { name: 'Potholes', color: '#FF0000' },
+            { name: 'Longitudinal Cracks', color: '#0000FF' },
+            { name: 'Transverse Cracks', color: '#008000' },
+            { name: 'Alligator Cracks', color: '#FFA500' },
+            { name: 'Edge Cracks', color: '#800080' },
+            { name: 'Reflection Cracks', color: '#FFFF00' },
+            { name: 'Unknown', color: '#999999' }
+        ];
+        
+        damageTypes.forEach(type => {
+            legendContent += `
+                <div class="legend-item">
+                    <div class="legend-color" style="background-color: ${type.color};"></div>
+                    <span>${type.name}</span>
+                </div>
+            `;
+        });
+        
+        legend.innerHTML = legendContent;
+        
+        // Position legend at bottom left
+        map.controls[google.maps.ControlPosition.LEFT_BOTTOM].push(legend);
+    }
+    
+    console.log("Map initialization complete");
+}
 </script>
+
+<!-- Google Maps API with the provided key -->
+<script async defer src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDJHPQxr5rddQVwE4x7aTbmgAKD-VSRzjg&callback=initMap"></script>
+{% endif %}
 {% endblock %}
