@@ -50,13 +50,16 @@
                         <a class="nav-link {% if request.endpoint == 'map_view' %}active{% endif %}" href="{{ url_for('map_view') }}">Map</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {% if request.endpoint == 'analytics' %}active{% endif %}" href="{{ url_for('analytics') }}">Analytics</a>
+                        <a class="nav-link {{ 'active' if request.endpoint == 'analytics' else '' }}" href="{{ url_for('analytics') }}">Analytics</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('city_analytics') }}">City Analytics</a>
+                        <a class="nav-link {{ 'active' if request.endpoint == 'city_analytics' else '' }}" href="{{ url_for('city_analytics') }}">City Analytics</a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('region_analytics') }}">Region Analytics</a>
+                        <a class="nav-link {{ 'active' if request.endpoint == 'state_analytics' else '' }}" href="{{ url_for('state_analytics') }}">Statewide Analytics</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {{ 'active' if request.endpoint == 'road_segments' else '' }}" href="{{ url_for('road_segments') }}">Road Segments</a>
                     </li>
                     {% endif %}
                 </ul>

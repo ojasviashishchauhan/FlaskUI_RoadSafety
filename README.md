@@ -1,4 +1,4 @@
-# Image Metadata Extractor
+# Road AI Safety
 
 A Flask web application that allows users to upload images, extract metadata including EXIF data and GPS coordinates, and visualize the image locations on a map.
 

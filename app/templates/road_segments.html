@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+
+{% block title %}Road Segments Analysis{% endblock %}
+
+{% block styles %}
+{{ super() }}
+<style>
+    .segment-card {
+        margin-bottom: 1.5rem;
+        border-left: 5px solid #ccc; /* Default border */
+    }
+    .segment-card.severity-Low {
+        border-left-color: var(--bs-success);
+    }
+    .segment-card.severity-Medium {
+        border-left-color: var(--bs-warning);
+    }
+    .segment_card.severity-High {
+        border-left-color: var(--bs-danger);
+    }
+    .segment-header {
+        background-color: #f8f9fa;
+        border-bottom: 1px solid #dee2e6;
+        padding: 0.75rem 1.25rem;
+    }
+    .segment-body {
+        padding: 1.25rem;
+    }
+    .segment-images-list {
+        max-height: 300px; /* Limit height */
+        overflow-y: auto; /* Add scrollbar */
+        margin-top: 1rem;
+    }
+    .segment-summary-dl dt {
+        font-weight: normal;
+        color: #6c757d;
+    }
+    .segment-summary-dl dd {
+        font-weight: 500;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2 class="mb-0">Road Segments Analysis</h2>
+        <div>
+             <a href="{{ url_for('dashboard') }}" class="btn btn-sm btn-outline-secondary">
+                <i class="fas fa-arrow-left me-1"></i> Back to Dashboard
+            </a>
+        </div>
+    </div>
+
+    <!-- Filter Form -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <form method="GET" action="{{ url_for('road_segments') }}">
+                <div class="row align-items-end g-2">
+                    <div class="col-md-4">
+                        <label for="distance" class="form-label">Max Distance (km):</label>
+                        <input type="number" class="form-control" id="distance" name="distance" 
+                               value="{{ cluster_distance }}" step="0.5" min="0.1">
+                    </div>
+                    <div class="col-md-2">
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="fas fa-filter me-1"></i> Update Segments
+                        </button>
+                    </div>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    {% if show_error %}
+        <div class="alert alert-danger">
+            <strong>Error:</strong> {{ error_message or 'An unknown error occurred.' }}
+        </div>
+    {% endif %}
+
+    {% if has_data %}
+        <p class="text-muted mb-3">Showing {{ segments|length }} segment(s) based on a max distance of {{ cluster_distance }} km between damages.</p>
+        
+        {% for segment in segments %}
+        <div class="card segment-card severity-{{ segment.severity }}">
+            <div class="segment-header">
+                <h5 class="mb-0">{{ segment.name }} (ID: {{ segment.id }})</h5>
+                <small class="text-muted">Center: {{ "%.4f"|format(segment.center.lat) }}, {{ "%.4f"|format(segment.center.lng) }}</small>
+            </div>
+            <div class="segment-body">
+                <div class="row">
+                    <div class="col-md-4">
+                        <h6>Segment Summary</h6>
+                        <dl class="row mb-0 segment-summary-dl">
+                            <dt class="col-sm-6">Severity</dt>
+                            <dd class="col-sm-6">
+                                <span class="badge bg-{{ 'danger' if segment.severity == 'High' else ('warning' if segment.severity == 'Medium' else 'success') }}">{{ segment.severity }}</span>
+                            </dd>
+                            <dt class="col-sm-6">Damages Found</dt>
+                            <dd class="col-sm-6">{{ segment.image_count }}</dd>
+                            <dt class="col-sm-6">Total Est. Area</dt>
+                            <dd class="col-sm-6">{{ "%.2f"|format(segment.total_area_m2) }} m²</dd>
+                             <dt class="col-sm-6">Avg. Est. Depth</dt>
+                            <dd class="col-sm-6">{{ "%.1f"|format(segment.avg_depth_cm) }} cm</dd>
+                        </dl>
+                        <h6 class="mt-3">Damage Types</h6>
+                        <ul>
+                            {% for type, count in segment.damage_summary.items() %}
+                                <li>{{ type|title }}: {{ count }}</li>
+                            {% else %}
+                                <li>No specific types recorded.</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    <div class="col-md-8">
+                        <h6>Damages in this Segment ({{ segment.image_count }})</h6>
+                        {% if segment.images %}
+                        <div class="list-group segment-images-list">
+                            {% for img in segment.images %}
+                            <a href="{{ url_for('image_details', image_id=img.id) }}" 
+                               class="list-group-item list-group-item-action flex-column align-items-start">
+                                <div class="d-flex w-100 justify-content-between">
+                                    <h6 class="mb-1">{{ img.filename }} ({{ img.type|title }})</h6>
+                                    <small>{{ img.upload_time.strftime('%Y-%m-%d') if img.upload_time else 'N/A' }}</small>
+                                </div>
+                                <p class="mb-1 small">
+                                    Severity: {{ img.severity }} | Area: {{ '%.2f'|format(img.area) }}m² | Depth: {{ '%.1f'|format(img.depth) }}cm
+                                </p>
+                            </a>
+                             {% endfor %}
+                        </div>
+                        {% else %}
+                            <p class="text-muted">No image details available for this segment.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+
+    {% elif not show_error %}
+        <div class="alert alert-info text-center">
+            <i class="fas fa-info-circle fa-2x mb-2"></i><br>
+            No damaged images with location data found to create segments.
+        </div>
+    {% endif %}
+
+</div> 
+{% endblock %}

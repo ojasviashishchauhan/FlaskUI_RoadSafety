@@ -70,7 +70,7 @@
         <div class="text-center mt-5">
             <h2 class="mb-4">No Data Available for Analysis</h2>
             <p class="lead mb-4">Upload some images to see business insights and analytics.</p>
-            <a href="{{ url_for('upload') }}" class="btn btn-primary btn-lg">
+            <a href="{{ url_for('upload_image') }}" class="btn btn-primary btn-lg">
                 <i class="fas fa-upload me-2"></i> Upload Images
             </a>
         </div>
@@ -119,9 +119,9 @@
                         <div class="d-flex justify-content-between">
                             <div>
                                 <p class="stat-title">Avg Processing Time</p>
-                                <h3 class="stat-value">{{ "%.2f"|format(processing_times.avg_time) }}s</h3>
+                                <h3 class="stat-value">{{ "%.2f"|format(stats_summary.avg_processing_time) }}s</h3>
                                 <p class="stat-change">
-                                    <i class="fas fa-clock"></i> Processing Speed
+                                    <i class="fas fa-clock"></i> Overall Avg Speed
                                 </p>
                             </div>
                             <div class="stat-icon">
@@ -395,7 +395,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // --- Damage Types Distribution --- 
         try {
             const damageTypesCtx = document.getElementById('damageTypesChart').getContext('2d');
-            const damageTypesDataRaw = {{ damage_types|tojson }};
+            const damageTypesDataRaw = {{ damage_type_distribution|tojson }};
             const damageTypesLabels = Object.keys(damageTypesDataRaw);
             const damageTypesData = Object.values(damageTypesDataRaw);
             new Chart(damageTypesCtx, {
@@ -447,7 +447,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // --- Processing Time by Image Type --- 
         try {
             const procTimeCtx = document.getElementById('processingTimeByTypeChart').getContext('2d');
-            const procTimeDataRaw = {{ avg_time_by_type|tojson }};
+            const procTimeDataRaw = {{ processing_time_by_type|tojson }};
             const procTimeLabels = Object.keys(procTimeDataRaw);
             const procTimeData = Object.values(procTimeDataRaw);
             new Chart(procTimeCtx, {
@@ -475,15 +475,15 @@ document.addEventListener('DOMContentLoaded', function() {
         // --- Error Impact Analysis --- 
         try {
             const errorCtx = document.getElementById('errorImpactChart').getContext('2d');
-            const errorDataRaw = {{ error_analysis|tojson }};
-            const errorLabels = errorDataRaw.map(e => e.type); // Error type
-            const errorData = errorDataRaw.map(e => e.count); // Count of errors
+            const topRiskAreasRaw = {{ top_risk_areas|tojson }};
+            const errorLabels = topRiskAreasRaw.map(e => e.name); // Use name field
+            const errorData = topRiskAreasRaw.map(e => e.score); // Use score field
             new Chart(errorCtx, {
                 type: 'doughnut',
                 data: {
                     labels: errorLabels,
                     datasets: [{
-                        label: 'Risk Distribution',
+                        label: 'Risk Score',
                         data: errorData,
                         backgroundColor: getColors(errorLabels.length)
                     }]
@@ -511,11 +511,11 @@ document.addEventListener('DOMContentLoaded', function() {
         // --- Geographical Damage Distribution --- 
         try {
             const geoCtx = document.getElementById('geoDamageChart').getContext('2d');
-            const locationStatsRaw = {{ location_stats|tojson }};
-            const damageTypes = {{ damage_types|tojson }};
+            const locationStatsRaw = {{ geographical_distribution|tojson }};
+            const damageTypes = {{ damage_type_distribution|tojson }};
             
             // Get unique locations and prepare datasets
-            const locations = locationStatsRaw.map(loc => loc._id).filter(name => name !== 'Unknown').slice(0, 8);
+            const locations = Object.keys(locationStatsRaw).slice(0, 8);
             
             // Create the chart
             new Chart(geoCtx, {
@@ -525,16 +525,14 @@ document.addEventListener('DOMContentLoaded', function() {
                     datasets: [{
                         label: 'Total Images',
                         data: locations.map(locName => {
-                            const loc = locationStatsRaw.find(l => l._id === locName);
-                            return loc ? loc.count : 0;
+                            return locationStatsRaw[locName] ? locationStatsRaw[locName].total : 0;
                         }),
                         backgroundColor: chartColors.blue,
                         order: 1
                     }, {
                         label: 'Damage Detected',
                         data: locations.map(locName => {
-                            const loc = locationStatsRaw.find(l => l._id === locName);
-                            return loc ? loc.damage_detected : 0;
+                            return locationStatsRaw[locName] ? locationStatsRaw[locName].damaged : 0;
                         }),
                         backgroundColor: chartColors.red,
                         order: 2
@@ -568,10 +566,7 @@ document.addEventListener('DOMContentLoaded', function() {
                                 footer: function(tooltipItems) {
                                     const idx = tooltipItems[0].dataIndex;
                                     const locName = locations[idx];
-                                    const loc = locationStatsRaw.find(l => l._id === locName);
-                                    if (loc) {
-                                        return `Avg Confidence: ${loc.avg_confidence.toFixed(1)}%`;
-                                    }
+                                    const locData = locationStatsRaw[locName];
                                     return '';
                                 }
                             }

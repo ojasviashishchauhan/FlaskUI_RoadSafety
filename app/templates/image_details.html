@@ -273,6 +273,21 @@
                                     <li class="list-group-item px-0">
                                         <strong>Type:</strong> {{ detection.class_name|title }} <br>
                                         <strong>Confidence:</strong> {{ "%.1f"|format(detection.confidence * 100) }}% <br>
+                                        {# Add Area Display #}
+                                        {% if detection.accurate_area_m2 is not none %}
+                                            <strong>Area:</strong> {{ "%.2f"|format(detection.accurate_area_m2) }} m² <br>
+                                        {% else %}
+                                            {# Optionally show fallback or N/A #}
+                                            {# <strong>Area:</strong> N/A <br> #}
+                                        {% endif %}
+                                        {# Add Depth Display (Conditional) #}
+                                        {% if detection.estimated_depth_cm is not none and detection.class_name|lower == 'pothole' %}
+                                            <strong>Depth:</strong> {{ "%.1f"|format(detection.estimated_depth_cm) }} cm <br>
+                                        {# Optionally show N/A only for potholes if depth is expected but missing #}
+                                        {# {% elif detection.class_name|lower == 'pothole' %}
+                                            <strong>Depth:</strong> N/A <br> 
+                                        #}
+                                        {% endif %}
                                         <strong>Box:</strong> {{ detection.bbox|map('int')|list }} <br>
                                         {% if detection.mask %}
                                             <strong>Polygon Points:</strong> {{ detection.mask|length }} <br>
@@ -483,6 +498,76 @@
         </div>
     </div>
     {# --- End: Metadata & Location Section (Prediction Details Removed) --- #}
+
+    {# --- ADD Video Specific Details Section --- #}
+    {% if image.media_type == 'video' and image.processing_status == 'completed' %}
+    <div class="row mt-4">
+        <div class="col-md-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Video Processing Details</h5>
+                </div>
+                <div class="card-body">
+                    {% if image.prediction_results %}
+                        <p><strong>Summary:</strong> {{ image.prediction_results.get('message', 'No summary available.') }}</p>
+                        
+                        {# --- Display Unique Damage Reports --- #}
+                        {% set unique_reports = image.prediction_results.get('unique_damage_reports', []) %}
+                        {% if unique_reports %}
+                            <h6>Tracked Unique Damage Instances (Min Duration: {{ image.prediction_results.get('min_track_duration_frames', 'N/A') }} frames)</h6>
+                            <ul class="list-group mb-3">
+                                {% for report in unique_reports %}
+                                    <li class="list-group-item">
+                                        <strong>Type:</strong> {{ report.class_name }} | 
+                                        <strong>Track ID:</strong> {{ report.track_id }} | 
+                                        <strong>Frames:</strong> {{ report.start_frame }} - {{ report.end_frame }} ({{ report.duration_frames }} frames)
+                                    </li>
+                                {% endfor %}
+                            </ul>
+                        {% else %}
+                            <p>No unique damage instances met the tracking criteria.</p>
+                        {% endif %}
+
+                        {# --- Display ALL Frame Detections --- #}
+                        {% set all_detections = image.prediction_results.get('all_frame_detections', []) %}
+                        {% if all_detections %}
+                            <h6 class="mt-4">Raw Frame-by-Frame Detections (Confidence >= {{ image.prediction_results.get('min_confidence_threshold', 'N/A') }})</h6>
+                            <div style="max-height: 400px; overflow-y: auto; border: 1px solid #ccc; padding: 10px;">
+                                <table class="table table-sm table-striped table-bordered">
+                                    <thead class="thead-light">
+                                        <tr>
+                                            <th>Frame #</th>
+                                            <th>Class</th>
+                                            <th>Confidence</th>
+                                            <th>Bounding Box (x1, y1, x2, y2)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                    {% for frame_data in all_detections %}
+                                        {% for detection in frame_data.detections %}
+                                        <tr>
+                                            <td>{{ frame_data.frame }}</td>
+                                            <td>{{ detection.class_name }}</td>
+                                            <td>{{ "%.2f"|format(detection.confidence * 100) }}%</td>
+                                            <td>{{ detection.bbox | map('int') | list | join(', ') }}</td>
+                                        </tr>
+                                        {% endfor %}
+                                    {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        {% else %}
+                            <p class="mt-3">No raw detections recorded (or confidence threshold not met).</p>
+                        {% endif %}
+                    {% else %}
+                        <p>No prediction results available for this video.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+    {# --- END Video Specific Details Section --- #}
 
 </div>
 {% endblock %}

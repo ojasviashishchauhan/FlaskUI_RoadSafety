@@ -13,6 +13,8 @@ from exifread.utils import Ratio # Import Ratio for type checking
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 from app import app
+import subprocess # Add subprocess for ffprobe
+import json # Add json for parsing ffprobe output
 
 # Initialize geolocator globally but cautiously (consider thread safety if scaling heavily)
 # Using a specific user_agent is required by Nominatim's policy
@@ -565,45 +567,163 @@ def _get_location_from_coordinates(lat, lon):
 
 # --- New function for Video Metadata --- 
 def extract_video_metadata(video_path):
-    """Extracts metadata from a video file using OpenCV."""
+    """Extracts metadata from a video file using ffprobe (if available) and OpenCV."""
     metadata = {'error': None}
+    
+    # --- Try ffprobe first for detailed metadata including GPS --- 
     try:
-        import cv2
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise IOError(f"Cannot open video file: {video_path}")
-            
-        metadata['frame_width'] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        metadata['frame_height'] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        metadata['fps'] = round(fps, 2) if fps else None
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        metadata['frame_count'] = frame_count
-        if fps and frame_count:
-            duration = frame_count / fps
-            metadata['duration_seconds'] = round(duration, 2)
-            # Format duration as HH:MM:SS
-            td = datetime.timedelta(seconds=duration)
-            metadata['duration_formatted'] = str(td).split('.')[0]
-            
-        # Get codec information (FourCC)
-        fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-        metadata['codec_fourcc'] = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
+        # Command to get metadata in JSON format, show streams
+        command = [
+            'ffprobe', 
+            '-v', 'quiet',          # Suppress unnecessary logging
+            '-print_format', 'json', # Output as JSON
+            '-show_format',         # Include container format info
+            '-show_streams',        # Include stream info (video, audio, data)
+            video_path
+        ]
         
-        cap.release()
-        print(f"Successfully extracted video metadata for: {os.path.basename(video_path)}")
-    except ImportError:
-        msg = "OpenCV (cv2) is not installed. Cannot extract video metadata."
-        print(f"ERROR: {msg}")
-        metadata['error'] = msg
-    except Exception as e:
-        msg = f"Error extracting video metadata for {os.path.basename(video_path)}: {e}"
-        print(f"ERROR: {msg}")
-        metadata['error'] = str(e)
-        if 'cap' in locals() and cap.isOpened():
-            cap.release()
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        ffprobe_data = json.loads(result.stdout)
+        
+        # Extract format information
+        if 'format' in ffprobe_data:
+            fmt_info = ffprobe_data['format']
+            metadata['format_name'] = fmt_info.get('format_name')
+            metadata['duration_seconds'] = float(fmt_info.get('duration', 0))
+            metadata['size_bytes'] = int(fmt_info.get('size', 0))
+            metadata['bit_rate'] = int(fmt_info.get('bit_rate', 0))
             
-    return metadata
+            # Extract format tags (often contains rotation, creation_time, sometimes GPS)
+            if 'tags' in fmt_info:
+                 metadata['format_tags'] = fmt_info['tags'] # Store all format tags
+                 # Check common GPS tags in format metadata
+                 if 'location' in fmt_info['tags']:
+                     # Format is often like "+12.345-078.910/" - needs parsing
+                     loc_str = fmt_info['tags']['location']
+                     try:
+                          # Simple regex assuming '+/-DD.DDD+/-DDD.DDD/' format
+                          import re
+                          match = re.match(r"([+-]\d+\.\d+)([+-]\d+\.\d+)", loc_str)
+                          if match:
+                               metadata['latitude'] = float(match.group(1))
+                               metadata['longitude'] = float(match.group(2))
+                     except Exception as loc_parse_err:
+                          print(f"Warning: Could not parse GPS location tag: {loc_str} - Error: {loc_parse_err}")
+                 elif 'creation_time' in fmt_info['tags']:
+                      metadata['creation_time'] = fmt_info['tags']['creation_time']
+
+        # Extract video stream information
+        video_stream = next((s for s in ffprobe_data.get('streams', []) if s.get('codec_type') == 'video'), None)
+        if video_stream:
+            metadata['frame_width'] = video_stream.get('width')
+            metadata['frame_height'] = video_stream.get('height')
+            metadata['codec_name'] = video_stream.get('codec_name')
+            metadata['profile'] = video_stream.get('profile')
+            # Calculate FPS if possible
+            avg_fps_str = video_stream.get('avg_frame_rate', '0/0')
+            try:
+                num, den = map(int, avg_fps_str.split('/'))
+                if den > 0:
+                    metadata['fps'] = round(num / den, 2)
+                else: 
+                    metadata['fps'] = None
+            except ValueError:
+                metadata['fps'] = None
+            metadata['stream_tags'] = video_stream.get('tags', {}) # Store video stream tags
+            # Check for rotation in video stream tags
+            if 'rotate' in metadata['stream_tags']:
+                 metadata['rotation'] = metadata['stream_tags']['rotate']
+            # Check for creation time in video stream tags
+            if 'creation_time' in metadata['stream_tags'] and 'creation_time' not in metadata:
+                 metadata['creation_time'] = metadata['stream_tags']['creation_time']
+        
+        # Extract data stream information (look for GPS here too)
+        gps_stream = next((s for s in ffprobe_data.get('streams', []) if s.get('codec_tag_string') == 'gpmd' or s.get('codec_tag_string') == 'rtmd'), None)
+        if gps_stream and 'tags' in gps_stream:
+             metadata['gps_stream_tags'] = gps_stream['tags']
+             # Look for specific GPS coordinate tags within the data stream
+             # Keys can vary wildly depending on camera/muxer (e.g., 'location', 'GPSCoordinates')
+             if 'location' in gps_stream['tags'] and 'latitude' not in metadata:
+                  loc_str = gps_stream['tags']['location']
+                  try:
+                       import re
+                       match = re.match(r"([+-]\d+\.\d+)([+-]\d+\.\d+)", loc_str)
+                       if match:
+                           metadata['latitude'] = float(match.group(1))
+                           metadata['longitude'] = float(match.group(2))
+                  except Exception as loc_parse_err:
+                       print(f"Warning: Could not parse GPS location tag from data stream: {loc_str} - Error: {loc_parse_err}")
+
+        print(f"Successfully extracted video metadata using ffprobe for: {os.path.basename(video_path)}")
+
+    except FileNotFoundError:
+        msg = "ffprobe (part of FFmpeg) not found. Cannot extract detailed video metadata including GPS. Falling back to OpenCV."
+        print(f"WARNING: {msg}")
+        metadata['warning'] = msg # Add warning instead of error for fallback
+    except subprocess.CalledProcessError as e:
+        msg = f"ffprobe command failed for {os.path.basename(video_path)}: {e.stderr}"
+        print(f"WARNING: {msg}")
+        metadata['warning'] = msg
+    except json.JSONDecodeError as e:
+        msg = f"Failed to parse ffprobe JSON output for {os.path.basename(video_path)}: {e}"
+        print(f"WARNING: {msg}")
+        metadata['warning'] = msg
+    except Exception as e:
+        msg = f"Unexpected error during ffprobe processing for {os.path.basename(video_path)}: {e}"
+        print(f"WARNING: {msg}")
+        metadata['warning'] = msg
+        
+    # --- Fallback/Supplement with OpenCV for basic info if needed --- 
+    # Especially useful if ffprobe failed or didn't provide dimensions/fps
+    if 'frame_width' not in metadata or 'fps' not in metadata:
+        print(f"Attempting OpenCV fallback for basic metadata: {os.path.basename(video_path)}")
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                # Don't overwrite ffprobe error if it exists
+                if not metadata.get('error') and not metadata.get('warning'):
+                     metadata['error'] = f"OpenCV fallback failed: Cannot open video file: {video_path}"
+                raise IOError(metadata['error'] or "Cannot open video") # Raise exception to stop
+                
+            # Only add if missing from ffprobe data
+            if 'frame_width' not in metadata:
+                 metadata['frame_width'] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            if 'frame_height' not in metadata:
+                 metadata['frame_height'] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if 'fps' not in metadata:
+                 fps = cap.get(cv2.CAP_PROP_FPS)
+                 metadata['fps'] = round(fps, 2) if fps else None
+            if 'frame_count' not in metadata:
+                 frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                 metadata['frame_count'] = frame_count
+            if 'duration_seconds' not in metadata and metadata.get('fps') and metadata.get('frame_count'):
+                 duration = metadata['frame_count'] / metadata['fps']
+                 metadata['duration_seconds'] = round(duration, 2)
+                 td = datetime.timedelta(seconds=duration)
+                 metadata['duration_formatted'] = str(td).split('.')[0]
+            if 'codec_fourcc' not in metadata:
+                 fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+                 metadata['codec_fourcc'] = "".join([chr((fourcc >> 8 * i) & 0xFF) for i in range(4)])
+            
+            cap.release()
+            print(f"Successfully supplemented video metadata with OpenCV for: {os.path.basename(video_path)}")
+        except ImportError:
+            msg = "OpenCV (cv2) is not installed. Cannot perform fallback metadata extraction."
+            print(f"ERROR: {msg}")
+            if not metadata.get('error') and not metadata.get('warning'): # Only set error if ffprobe didn't already fail
+                 metadata['error'] = msg
+        except Exception as e:
+            # Don't overwrite ffprobe error/warning
+            if not metadata.get('error') and not metadata.get('warning'):
+                msg = f"Error during OpenCV fallback for {os.path.basename(video_path)}: {e}"
+                print(f"ERROR: {msg}")
+                metadata['error'] = str(e)
+            if 'cap' in locals() and cap.isOpened():
+                cap.release()
+
+    # Final sanitization before returning
+    return _sanitize_for_bson(metadata)
 # --- End Video Metadata function --- 
 
 # --- IoU Calculation Utility --- 

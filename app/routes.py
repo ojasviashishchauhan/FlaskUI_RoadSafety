@@ -34,6 +34,10 @@ import threading
 import mongoengine.errors
 import traceback
 
+# --- DeepSORT Imports ---
+# from .deep_sort.deep_sort import DeepSort 
+# ----------------------
+
 # --- MiDaS Imports and Setup ---
 import torch
 from transformers import DPTImageProcessor, DPTForDepthEstimation
@@ -44,17 +48,17 @@ midas_model = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 try:
-    print("Loading MiDaS model...")
+    app.logger.info("Loading MiDaS model...")
     # Use a smaller model for potentially faster inference on CPU if needed
     # model_checkpoint = "Intel/dpt-large"
     model_checkpoint = "Intel/dpt-hybrid-midas"
     midas_processor = DPTImageProcessor.from_pretrained(model_checkpoint)
     midas_model = DPTForDepthEstimation.from_pretrained(model_checkpoint).to(device)
     midas_model.eval() # Set model to evaluation mode
-    print(f"MiDaS model loaded successfully onto {device}.")
+    app.logger.info(f"MiDaS model loaded successfully onto {device}.")
 except Exception as e:
-    print(f"Error loading MiDaS model: {e}")
-    print("Depth estimation will be disabled.")
+    app.logger.error(f"Error loading MiDaS model: {e}")
+    app.logger.warning("Depth estimation will be disabled.")
 # --- End MiDaS Setup ---
 
 # Initialize ML predictor
@@ -118,9 +122,15 @@ def register():
             user.save() # Save the new user document
             flash('Your account has been created! You can now log in.', 'success')
             return redirect(url_for('login'))
+        except mongoengine.errors.NotUniqueError as e:
+             # More specific error handling for duplicates
+             app.logger.warning(f"Registration failed for {form.username.data}: Duplicate username or email.")
+             flash('Registration failed: Username or Email already exists.', 'danger') 
         except Exception as e:
             # Handle potential errors like duplicate username/email
-            flash(f'Registration failed: {e}', 'danger') 
+            app.logger.error(f"Registration failed for {form.username.data}: {e}")
+            app.logger.error(traceback.format_exc())
+            flash(f'Registration failed due to an unexpected error.', 'danger') 
             
     return render_template('register.html', form=form)
 
@@ -173,31 +183,32 @@ def process_image_async(file_data, image_id, image_type_from_form):
         original_filename_for_log = str(image_id)
 
     # --- LOGGING: Task Start --- 
-    print(f"[PID:{os.getpid()}] process_image_async starting for: ID {image_id} (Orig: {original_filename_for_log})") 
+    app.logger.info(f"[PID:{os.getpid()}] process_image_async starting for: ID {image_id} (Orig: {original_filename_for_log})") 
     image = None  # Initialize image to None
+    start_time = time.time() # Track processing time
     try:
         # Find the specific image entry by ID
         image = Image.objects(id=image_id).first()
         if not image:
-             print(f"Error: Could not find image entry for ID {image_id}")
+             app.logger.error(f"Error: Could not find image entry for ID {image_id}")
              return # Exit if no entry found
 
-        # Generate unique filename (if not already set, though it likely is)
+        # Generate unique filename (if not already set)
         if not image.filename or not image.file_path:
             unique_filename_part = uuid.uuid4().hex
             filename_ext = os.path.splitext(image.original_filename)[1] if image.original_filename else '.png'
             image.filename = f"{unique_filename_part}{filename_ext}"
             image.file_path = os.path.join(app.config['UPLOAD_FOLDER'], image.filename)
-            print(f"Generated filename {image.filename} for ID {image_id}")
+            app.logger.info(f"Generated filename {image.filename} for ID {image_id}")
 
         # Save the actual image file data
-        print(f"Saving image file to {image.file_path}")
+        app.logger.info(f"Saving image file to {image.file_path}")
         with open(image.file_path, 'wb') as f:
             f.write(file_data)
-        print(f"Image file saved for ID {image_id}")
+        app.logger.info(f"Image file saved for ID {image_id}")
         
         # --- Extract and Save Metadata/Location --- 
-        print(f"Extracting metadata for {image.filename} (ID: {image.id})")
+        app.logger.info(f"Extracting metadata for {image.filename} (ID: {image.id})")
         metadata = extract_image_metadata(image.file_path)
         location = {}
         # Check for lat/lon in the primary metadata structure
@@ -209,16 +220,16 @@ def process_image_async(file_data, image_id, image_type_from_form):
             # Get detailed location information
             try:
                 location_details = get_location_details(lat, lon)
-                print(f"Location details found: {location_details}")
+                app.logger.info(f"Location details found for ID {image.id}: {location_details}")
                 # Store the entire location details dictionary
                 location.update(location_details)
             except Exception as loc_err:
-                print(f"Error getting location details for ID {image.id}: {loc_err}")
+                app.logger.warning(f"Error getting location details for ID {image.id}: {loc_err}") # Warning, not error
                 location['formatted_address'] = "Address lookup failed"
                 location['city'] = "Unknown"
                 location['state'] = "Unknown"
-        print(f"Assigning Metadata: {metadata} for ID {image.id}")
-        print(f"Assigning Location: {location} for ID {image.id}")
+        app.logger.info(f"Assigning Metadata: {metadata} for ID {image.id}")
+        app.logger.info(f"Assigning Location: {location} for ID {image.id}")
         image.metadata = metadata
         image.location = location
         # --- End Metadata/Location Extraction ---
@@ -226,27 +237,30 @@ def process_image_async(file_data, image_id, image_type_from_form):
         # Update status to processing 
         image.processing_status = 'processing'
         image.image_type = image_type_from_form 
-        print(f"Saving initial state (processing + meta/loc) for ID {image.id}")
-        image.save()
-        print(f"Initial state saved for ID {image.id}")
+        app.logger.info(f"Saving initial state (processing + meta/loc) for ID {image.id}")
+        try:
+            image.save()
+            app.logger.info(f"Initial state saved for ID {image.id}")
+        except Exception as save_err:
+             app.logger.error(f"Error saving initial state for ID {image.id}: {save_err}")
+             # Potentially mark as failed immediately? Or let subsequent steps fail?
+             # Let's try to continue, prediction step will likely fail if needed
+             pass 
         
         # Run ML prediction
-        print(f"Starting ML prediction for {image.filename} (ID: {image.id})")
+        app.logger.info(f"Starting ML prediction for {image.filename} (ID: {image.id})")
         prediction = ml_predictor.predict(image.file_path, image.image_type)
-        print(f"ML prediction completed for {image.filename} (ID: {image.id})")
+        app.logger.info(f"ML prediction completed for {image.filename} (ID: {image.id})")
         
-        # --- Remove RADICAL SIMPLIFICATION TEST ---
-        # (Code block removed)
-        # --- END RADICAL SIMPLIFICATION TEST ---
+        # Check for prediction error from ml_predictor
+        if prediction.get('error'):
+             raise Exception(f"ML Prediction failed: {prediction['error']}")
 
-        # --- Restore Original result processing ---
+        # --- Update DB with results --- 
+        # Refetch to avoid potential conflicts if other processes exist (though unlikely with lock)
         image_to_update = Image.objects(id=image.id).first()
         if not image_to_update:
-             print(f"ERROR: Could not find image {image.filename} (ID: {image.id}) for final save.")
-             # Consider how to handle this - maybe mark original image object as failed?
-             # image.processing_status = 'failed' 
-             # image.error_message = 'Failed to refetch document before final save'
-             # image.save()
+             app.logger.error(f"ERROR: Could not find image {image.filename} (ID: {image.id}) for final save.")
              return # Exit processing
 
         image_to_update.processing_status = 'completed'
@@ -254,23 +268,20 @@ def process_image_async(file_data, image_id, image_type_from_form):
         
         # Log confidence score before assigning
         raw_preds = prediction.get('raw_predictions', [])
-        # Calculate confidence score (e.g., average or max of detections)
         if raw_preds:
-             # Example: Use max confidence among detections
-             conf_score = max(p.get('confidence', 0.0) for p in raw_preds)
+             conf_score = max((p.get('confidence', 0.0) for p in raw_preds), default=0.0)
         else:
              conf_score = 0.0
-        print(f"Assigning confidence_score: {conf_score} (Type: {type(conf_score)}) for {image.filename}")
+        app.logger.info(f"Assigning confidence_score: {conf_score} for {image.filename}")
         image_to_update.confidence_score = conf_score 
         
-        # Prepare prediction results dict (store full results again)
         annotated_path = prediction.get('annotated_path')
-        # The 'raw_preds' variable holds the list from ml_predictor.predict
 
         # --- Start MiDaS Depth Estimation & Area from Mask --- 
         midas_success = False
         if midas_model and midas_processor and raw_preds: # Only run if model loaded and detections exist
-            print(f"[PID:{os.getpid()}] Running MiDaS depth estimation for {image.filename}...")
+            app.logger.info(f"[PID:{os.getpid()}] Running MiDaS depth estimation for {image.filename}...")
+            midas_start_time = time.time()
             try:
                 # Load image with PIL for transformers
                 pil_image = PILImage.open(image.file_path).convert("RGB")
@@ -292,41 +303,73 @@ def process_image_async(file_data, image_id, image_type_from_form):
                     align_corners=False,
                 ).squeeze()
                 depth_map = prediction_interpolated.cpu().numpy() # Relative depth map
-                print(f"[PID:{os.getpid()}] MiDaS inference complete. Depth map shape: {depth_map.shape}")
+                midas_infer_time = time.time() - midas_start_time
+                app.logger.info(f"[PID:{os.getpid()}] MiDaS inference complete for {image.filename}. Shape: {depth_map.shape} (Took {midas_infer_time:.2f}s)")
 
                 # Calculate depth and area for each prediction using masks
-                for pred in raw_preds:
+                processing_errors = [] # Collect warnings/errors during metric calculation
+                for pred_idx, pred in enumerate(raw_preds):
                     pred['estimated_depth_cm'] = 0 # Default
                     pred['accurate_area_pixels'] = 0 # Default
+                    pred['accurate_area_m2'] = 0 # Default
                     
                     if 'mask' in pred and pred['mask'] is not None:
+                        mask_polygon_points = np.array(pred['mask'], dtype=np.int32)
+                        if mask_polygon_points.size == 0:
+                             app.logger.warning(f"Warning: Empty mask polygon for pred {pred_idx} in {image.filename}. Skipping metrics.")
+                             continue
+
                         # 1. Calculate Area from Mask Polygon
                         try:
-                            polygon_points = np.array(pred['mask'], dtype=np.int32)
-                            area_pixels = cv2.contourArea(polygon_points)
+                            area_pixels = cv2.contourArea(mask_polygon_points)
                             pred['accurate_area_pixels'] = area_pixels
+
+                            # --- START SIMPLIFIED Area m2 Estimation --- 
+                            if area_pixels > 0:
+                                # Define a placeholder average pixels/meter value.
+                                # This NEEDS TUNING based on typical camera setup and image resolution!
+                                ESTIMATED_AVG_PIXELS_PER_METER = 200.0 # Example: Assumes objects are roughly scaled such that 200px = 1m
+                                
+                                if ESTIMATED_AVG_PIXELS_PER_METER > 0:
+                                    area_m2 = area_pixels / (ESTIMATED_AVG_PIXELS_PER_METER ** 2)
+                                    pred['accurate_area_m2'] = round(area_m2, 3)
+                                    app.logger.debug(f"Img {image.filename}, Pred {pred_idx}: AreaPx={area_pixels:.0f}, Px/m (Avg)={ESTIMATED_AVG_PIXELS_PER_METER:.1f} -> Area={area_m2:.3f}m2")
+                                else:
+                                     pred['accurate_area_m2'] = 0 # Should not happen with positive constant
+                            else: # if area_pixels == 0
+                                pred['accurate_area_m2'] = 0 # Area is 0 if pixel area is 0
+                            # --- END SIMPLIFIED Area m2 Estimation ---
+
                         except Exception as area_err:
-                            print(f"Warning: Could not calculate mask area for pred in {image.filename}: {area_err}")
+                            err_msg = f"Warning: Could not calculate mask area or m2 for pred {pred_idx} in {image.filename}: {area_err}"
+                            app.logger.warning(err_msg)
+                            processing_errors.append(err_msg)
 
                         # 2. Calculate Depth from MiDaS map using Mask
                         try:
-                            boolean_mask = create_boolean_mask_from_polygon(pred['mask'], depth_map.shape)
-                            depth_values_in_mask = depth_map[boolean_mask]
-                            
-                            if depth_values_in_mask.size > 0:
-                                relative_avg_depth = np.mean(depth_values_in_mask)
-                                # !!! Apply Placeholder Calibration !!!
-                                pred['estimated_depth_cm'] = calibrate_midas_depth(relative_avg_depth)
-                            else:
-                                print(f"Warning: Boolean mask for pred in {image.filename} was empty.")
+                            # --- Pass required info to calibration function --- 
+                            # The calibration function now handles checks for empty masks/values internally.
+                            calibration_inputs = {
+                                'depth_map': depth_map, 
+                                'mask_polygon_points': mask_polygon_points 
+                            }
+                            pred['estimated_depth_cm'] = calibrate_midas_depth(calibration_inputs)
+                            # --- End Call --- 
 
                         except Exception as depth_err:
-                             print(f"Warning: Could not calculate MiDaS depth for pred in {image.filename}: {depth_err}")
+                             # Log the error and ensure depth is 0
+                             app.logger.warning(f"Warning: Error encountered calling/during calibrate_midas_depth for pred {pred_idx} in {image.filename}: {depth_err}")
+                             app.logger.error(traceback.format_exc()) # Log full traceback for debugging
+                             processing_errors.append(f"Error calculating depth for pred {pred_idx}: {depth_err}")
+                             pred['estimated_depth_cm'] = 0 # Set to 0 on error
+                    else:
+                         app.logger.warning(f"Warning: No mask found for prediction {pred_idx} in {image.filename}. Cannot calculate area/depth.")
+
                 midas_success = True
-                print(f"[PID:{os.getpid()}] MiDaS processing finished for {image.filename}. Success: {midas_success}")
+                app.logger.info(f"[PID:{os.getpid()}] MiDaS processing finished for {image.filename}. Success: {midas_success}")
             except Exception as midas_err:
-                print(f"ERROR during MiDaS processing for {image.filename}: {midas_err}")
-                traceback.print_exc()
+                app.logger.error(f"ERROR during MiDaS processing for {image.filename}: {midas_err}")
+                app.logger.error(traceback.format_exc())
                 # Keep raw_preds as they were, depth/area fields won't be added
         # --- End MiDaS --- 
 
@@ -352,7 +395,7 @@ def process_image_async(file_data, image_id, image_type_from_form):
             'annotated_path': annotated_path
         }
         # Log the prediction results dict before assigning
-        print(f"Assigning prediction_results: {pred_results_dict} for {image.filename}") 
+        app.logger.info(f"Assigning prediction_results: {pred_results_dict} for {image.filename}") 
         image_to_update.prediction_results = pred_results_dict
         
         # Extract processing time if available in prediction results
@@ -364,12 +407,12 @@ def process_image_async(file_data, image_id, image_type_from_form):
         
         image_to_update.annotated_image_path = annotated_path # Save annotated path
         
-        print(f"Attempting to save final FULL results for {image.filename} (ID: {image.id})...")
+        app.logger.info(f"Attempting to save final FULL results for {image.filename} (ID: {image.id})...")
         try:
             image_to_update.save()
-            print(f"Successfully saved final FULL results for {image.filename} (ID: {image.id})")
+            app.logger.info(f"Successfully saved final FULL results for {image.filename} (ID: {image.id})")
         except Exception as final_save_err:
-            print(f"ERROR saving final FULL results for {image.filename} (ID: {image.id}): {final_save_err}")
+            app.logger.error(f"ERROR saving final FULL results for {image.filename} (ID: {image.id}): {final_save_err}")
             # Log traceback for detailed error
             import traceback
             traceback.print_exc() 
@@ -378,24 +421,23 @@ def process_image_async(file_data, image_id, image_type_from_form):
                 image_to_update.processing_status = 'failed'
                 image_to_update.error_message = f"Failed to save results: {final_save_err}"
                 image_to_update.save()
-                print(f"Updated image ID {image.id} status to failed after save error.")
+                app.logger.info(f"Updated image ID {image.id} status to failed after save error.")
             except Exception as update_err:
-                print(f"Error updating status to failed for ID {image.id} after save error: {update_err}")
+                app.logger.error(f"Error updating status to failed for ID {image.id} after save error: {update_err}")
         # --- End original result processing ---
             
     except Exception as e:
-        print(f"Error in process_image_async for ID {image_id} (Orig: {original_filename_for_log}): {str(e)}")
-        import traceback
-        traceback.print_exc()
+        app.logger.error(f"Error in process_image_async for ID {image_id} (Orig: {original_filename_for_log}): {str(e)} (Duration: {time.time() - start_time:.2f}s)")
+        app.logger.error(traceback.format_exc())
         # Update database with error status if image object exists
         if image: # Use the image object fetched at the start
             try:
                 image.processing_status = 'failed'
                 image.error_message = str(e)
                 image.save()
-                print(f"Updated image ID {image_id} status to failed.")
+                app.logger.info(f"Updated image ID {image_id} status to failed.")
             except Exception as update_err:
-                print(f"Error updating error status for ID {image_id}: {update_err}")
+                app.logger.error(f"Error updating error status for ID {image_id}: {update_err}")
 
 @app.route('/upload/image', methods=['GET', 'POST'])
 @login_required
@@ -421,24 +463,24 @@ def upload_image():
                     processing_status='pending' 
                 )
                 initial_entry.save()
-                print(f"Created initial DB entry for {original_filename} with ID: {initial_entry.id}")
+                app.logger.info(f"Created initial DB entry for {original_filename} with ID: {initial_entry.id}")
                 
                 # Submit to thread pool OR run synchronously for Potholes
                 if form.image_type.data == 'Potholes':
-                    print(f"--- Running Potholes processing SYNCHRONOUSLY for {original_filename} ---")
+                    app.logger.info(f"--- Running Potholes processing SYNCHRONOUSLY for {original_filename} ---")
                     process_image_async(file_data, initial_entry.id, form.image_type.data)
-                    print(f"--- SYNCHRONOUS Potholes processing finished for {original_filename} ---")
+                    app.logger.info(f"--- SYNCHRONOUS Potholes processing finished for {original_filename} ---")
                 else:
                     future = thread_pool.submit(process_image_async, file_data, initial_entry.id, form.image_type.data)
-                # --- LOGGING: Task Submission --- 
-                    print(f"[PID:{os.getpid()}] Submitted ASYNC task for {original_filename} (User: {current_user_id_str}). Future running: {future.running()}") 
-                uploaded_count += 1
+                    # --- LOGGING: Task Submission (Moved inside else block) ---
+                    app.logger.info(f"[PID:{os.getpid()}] Submitted ASYNC task for {original_filename} (User: {current_user_id_str}). Future running: {future.running()}") 
                 
+                uploaded_count += 1
+            
             except Exception as e:
                 failed_count += 1
-                print(f"Failed to initiate processing for {original_filename}: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                app.logger.error(f"Failed to initiate processing for {original_filename}: {str(e)}")
+                app.logger.error(traceback.format_exc())
         
         if uploaded_count > 0:
             flash(f'{uploaded_count} file(s) uploaded and queued for processing.', 'success')
@@ -451,67 +493,115 @@ def upload_image():
 
 # --- Video Processing Function ---
 def process_video_async(file_data, video_doc_id, image_type):
-    """Processes video: runs prediction on frames, generates annotated video."""
-    print(f"[VID_PROC START] Starting processing for video ID: {video_doc_id}, Type: {image_type}")
+    """Processes video: runs prediction on frames, generates annotated video using Ultralytics tracker."""
+    logger = app.logger 
+    logger.info(f"[VID_PROC START] Starting processing for video ID: {video_doc_id}, Type: {image_type}")
     video_doc = None
     cap = None
     writer = None
-    annotated_video_path = None # Define here for use in finally block
-    processed_frame_count = 0 # Frames processed (read)
-    detection_frame_count = 0 # Frames with at least one detection
-    total_raw_detections = 0  # Total boxes detected across all frames
-    detected_objects_summary = [] # To store info about detections
+    annotated_video_path = None
+    processed_frame_count = 0
+    detection_frame_count = 0
+    total_raw_detections_in_video = 0
+    all_frame_detections = [] 
+    # Use defaultdict for easier history tracking
+    tracked_objects_history = defaultdict(lambda: {'class_name': 'Unknown', 'start_frame': -1, 'last_frame': -1, 'duration': 0, 'bboxes': [], 'confidences': []}) 
 
-    # --- Tracking State --- 
-    active_tracks = [] # List of dicts: {'id': track_id, 'bbox': [x1,y1,x2,y2], 'class_name': name, 'last_frame': frame_num}
-    next_track_id = 0
-    iou_threshold = 0.4 # IoU threshold for matching tracks
-    unique_damage_reports = [] # Store unique damages found
-    min_confidence_threshold = 0.4 # Ignore detections below this confidence
-    min_track_duration_frames = 3  # Require track to persist for this many frames
-    # ----------------------
+    # --- Tracking Parameters --- 
+    min_confidence_threshold = 0.3 # Confidence for initial detection (used by model.track indirectly)
+    tracker_config = 'botsort.yaml' # Using BoT-SORT for ReID capabilities
+    # Tracker parameters are now controlled by the YAML file (e.g., botsort.yaml)
+    # ---------------------------
 
     try:
+        # --- Get the YOLO model instance from MLPredictor --- 
+        yolo_model_instance = ml_predictor.models.get(image_type)
+        if not yolo_model_instance:
+            logger.warning(f"[VID_PROC WARN] YOLO model instance for type '{image_type}' not found in ml_predictor. Trying 'All'.")
+            yolo_model_instance = ml_predictor.models.get('All') # Try fallback
+            if not yolo_model_instance:
+                 logger.error(f"[VID_PROC ERROR] Fallback YOLO model 'All' not found either. Cannot proceed.")
+                 raise ValueError(f"YOLO model instance for type '{image_type}' or 'All' not found.")
+        model_used_type = image_type if yolo_model_instance == ml_predictor.models.get(image_type) else 'All'
+        logger.info(f"[VID_PROC] Using YOLO model instance for type '{model_used_type}' for tracking with {tracker_config}.")
+        # --- End Model Instance --- 
+
         video_doc = Image.objects(id=video_doc_id).first()
         if not video_doc or video_doc.media_type != 'video':
-            print(f"[VID_PROC ERROR] Invalid document or not a video for ID: {video_doc_id}")
+            logger.error(f"[VID_PROC ERROR] Invalid document or not a video for ID: {video_doc_id}")
             return
 
         # Ensure file path exists
         if not video_doc.file_path or not os.path.exists(video_doc.file_path):
-             # Regenerate path if missing and save file again (should ideally not happen)
-             if not video_doc.filename:
-                  unique_filename_part = uuid.uuid4().hex
-                  filename_ext = os.path.splitext(video_doc.original_filename)[1] if video_doc.original_filename else '.mp4'
-                  video_doc.filename = f"{unique_filename_part}{filename_ext}"
-             video_doc.file_path = os.path.join(app.config['UPLOAD_FOLDER'], video_doc.filename)
-             print(f"Regenerating file path: {video_doc.file_path}")
+             logger.warning(f"Regenerating file path: {video_doc.file_path}")
              with open(video_doc.file_path, 'wb') as f:
                  f.write(file_data)
+             logger.info("Video file saved.")
         
         input_video_path = video_doc.file_path
         
         # Extract metadata if not already present (or re-extract)
         if not video_doc.metadata or 'frame_width' not in video_doc.metadata:
-             print(f"Extracting video metadata for {video_doc.filename} (ID: {video_doc.id})")
+             logger.info(f"Extracting video metadata for {video_doc.filename} (ID: {video_doc.id})")
              metadata = extract_video_metadata(input_video_path)
              video_doc.metadata = metadata
         else:
+             # Metadata already exists, use it
              metadata = video_doc.metadata
+             logger.info(f"Using existing metadata for {video_doc.filename} (ID: {video_doc.id})")
+
+        # --- Process Location from Metadata (Similar to Image processing) --- 
+        location = {} 
+        lat = metadata.get('latitude')
+        lon = metadata.get('longitude')
+        if lat is not None and lon is not None:
+             # Ensure lat/lon are floats
+             try:
+                 lat = float(lat)
+                 lon = float(lon)
+                 location['latitude'] = lat
+                 location['longitude'] = lon
+                 # Get detailed location information using the utility function
+                 try:
+                     location_details = get_location_details(lat, lon)
+                     logger.info(f"Location details found for Video ID {video_doc.id}: {location_details}")
+                     location.update(location_details) # Add city, state etc. to location dict
+                 except Exception as loc_err:
+                     logger.warning(f"Error getting location details for Video ID {video_doc.id}: {loc_err}")
+                     location['formatted_address'] = "Address lookup failed"
+                     location['city'] = "Unknown"
+                     location['state'] = "Unknown"
+             except (ValueError, TypeError) as conv_err:
+                 logger.warning(f"Could not convert extracted lat/lon to float for Video ID {video_doc.id}: lat={lat}, lon={lon} - Error: {conv_err}")
+        else:
+             logger.info(f"Latitude/Longitude not found in metadata for Video ID {video_doc.id}. Cannot process location.")
+        
+        # Assign the processed location (even if empty) to the document field
+        video_doc.location = location 
+        # --- End Location Processing --- 
 
         video_doc.processing_status = 'processing'
         video_doc.image_type = image_type 
-        video_doc.save() # Save processing status and metadata
-        print(f"Initial state (processing + meta) saved for Video ID {video_doc.id}")
+        try:
+            video_doc.save() # Save processing status, metadata, AND location
+            logger.info(f"Initial state (processing + meta + loc) saved for Video ID {video_doc.id}")
+        except Exception as save_err:
+            logger.error(f"Error saving initial state (with location) for Video ID {video_doc.id}: {save_err}")
+            # If saving fails here, we should probably stop processing
+            raise save_err # Re-raise the exception to be caught by the outer block
 
-        # Check if metadata extraction failed
-        if not metadata or metadata.get('error') or 'frame_width' not in metadata:
-            raise ValueError(f"Failed to get valid video metadata: {metadata.get('error', 'Unknown error')}")
+        # Check if metadata extraction failed (e.g., OpenCV couldn't open file)
+        if metadata.get('error'):
+            err_msg = f"Failed to get valid video metadata: {metadata.get('error', 'Unknown error')}"
+            logger.error(f"[VID_PROC ERROR] {err_msg} for {video_doc.filename}")
+            raise ValueError(err_msg)
 
         # --- Video Reading and Writing Setup --- 
         cap = cv2.VideoCapture(input_video_path)
         if not cap.isOpened():
-            raise IOError(f"Cannot open video file: {input_video_path}")
+            err_msg = f"Cannot open video file: {input_video_path}"
+            logger.error(f"[VID_PROC ERROR] {err_msg}")
+            raise IOError(err_msg)
 
         # Define output path
         base, ext = os.path.splitext(video_doc.filename)
@@ -525,15 +615,15 @@ def process_video_async(file_data, video_doc_id, image_type):
         fps = metadata.get('fps', 25.0)
         width = metadata.get('frame_width')
         height = metadata.get('frame_height')
-        print(f"[VID_PROC DEBUG] Creating VideoWriter: Path={annotated_video_path}, FourCC=avc1, FPS={fps}, Size=({width}x{height})")
+        logger.info(f"[VID_PROC DEBUG] Creating VideoWriter: Path={annotated_video_path}, FourCC=avc1, FPS={fps}, Size=({width}x{height})")
         writer = cv2.VideoWriter(annotated_video_path, fourcc, fps, (width, height))
         if not writer.isOpened():
-             # Add more specific logging if writer fails
-             print(f"[VID_PROC ERROR] cv2.VideoWriter failed to open. Path={annotated_video_path}, FourCC={fourcc}, FPS={fps}, Size=({width},{height})")
-             raise IOError(f"Could not open VideoWriter for path: {annotated_video_path}")
-        print(f"[VID_PROC DEBUG] VideoWriter opened successfully.")
+             err_msg = f"cv2.VideoWriter failed to open. Path={annotated_video_path}, FourCC={fourcc}, FPS={fps}, Size=({width},{height})"
+             logger.error(f"[VID_PROC ERROR] {err_msg}")
+             raise IOError(err_msg)
+        logger.info(f"[VID_PROC DEBUG] VideoWriter opened successfully.")
 
-        print(f"Starting frame processing for Video ID: {video_doc_id}")
+        logger.info(f"Starting frame processing for Video ID: {video_doc_id}")
         total_frames = metadata.get('frame_count', 0)
         frame_num = 0
 
@@ -545,145 +635,167 @@ def process_video_async(file_data, video_doc_id, image_type):
             
             frame_num += 1
             # Process every Nth frame? For now, process all.
-            # if frame_num % 5 != 0: # Example: process every 5th frame
-            #    writer.write(frame) # Write original frame if skipping
+            # if frame_num % 5 != 0: 
+            #    writer.write(frame) 
             #    continue 
 
-            # Convert frame BGR to RGB for prediction
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Convert frame BGR to RGB (model.track expects BGR by default? Check docs, but usually BGR from cv2)
+            # frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) # Keep as BGR for model.track
+            frame_bgr = frame
 
-            # Run prediction
-            frame_predictions_raw = ml_predictor.predict_frame(frame_rgb, image_type)
-            total_raw_detections += len(frame_predictions_raw)
+            # --- Run Ultralytics Tracking --- 
+            # results = yolo_model_instance.track(source=frame_bgr, persist=True, tracker=tracker_config, conf=min_confidence_threshold, verbose=False)
+            # Adding stream=True might be necessary if passing frames one by one, but let's try without first.
+            # `persist=True` is key for maintaining tracks across frames.
+            # Pass the frame directly. conf is applied internally.
+            results = yolo_model_instance.track(source=frame_bgr, persist=True, tracker=tracker_config, verbose=False)
+            # ----------------------------- 
 
-            # --- Filter detections by confidence --- 
-            frame_predictions = [p for p in frame_predictions_raw if p.get('confidence', 0.0) >= min_confidence_threshold]
-            # -------------------------------------
-            
-            # Check if *any* high-confidence detections were found
-            if frame_predictions:
-                 detection_frame_count += 1 
-                 # Only print confident detections
-                 # print(f"-- [VID_PROC Frame {frame_num}] Confident Detections: {frame_predictions}")
-            
-            current_frame_bboxes = [p['bbox'] for p in frame_predictions]
-            current_frame_classes = [p['class_name'] for p in frame_predictions]
-            matched_indices = set()
-            new_active_tracks = []
+            # --- Process Tracking Results --- 
+            current_track_ids = set()
+            frame_has_detections = False
+            annotated_frame = frame_bgr.copy() # Start with the original frame
 
-            # Try to match current detections with active tracks from previous frame
-            if frame_predictions and active_tracks:
-                 # detection_frame_count incremented above
-                 for track in active_tracks:
-                     best_match_idx = -1
-                     best_iou = iou_threshold
-                     for i in range(len(current_frame_bboxes)):
-                         if i in matched_indices or current_frame_classes[i] != track['class_name']:
-                             continue 
-                         iou = calculate_iou(track['bbox'], current_frame_bboxes[i])
-                         if iou > best_iou:
-                             best_iou = iou
-                             best_match_idx = i
-                     
-                     if best_match_idx != -1:
-                         track['bbox'] = current_frame_bboxes[best_match_idx] 
-                         track['last_frame'] = frame_num
-                         # Increment duration when matched
-                         track['duration'] = track.get('duration', 1) + 1 
-                         new_active_tracks.append(track) 
-                         matched_indices.add(best_match_idx)
-            # --- End IoU Matching --- 
-                 
-            # Add unmatched (high-confidence) detections as new tracks
-            for i in range(len(current_frame_bboxes)):
-                if i not in matched_indices:
-                    new_track = {
-                        'id': next_track_id,
-                        'bbox': current_frame_bboxes[i],
-                        'class_name': current_frame_classes[i],
-                        'start_frame': frame_num,
-                        'last_frame': frame_num,
-                        'duration': 1 # Initial duration is 1 frame
-                    }
-                    new_active_tracks.append(new_track)
-                    # Don't add to unique_damage_reports yet, wait for duration check
-                    next_track_id += 1
+            if results and results[0].boxes and results[0].boxes.id is not None:
+                frame_has_detections = True
+                detection_frame_count += 1
+                
+                # Get boxes, track IDs, confidences, and classes
+                boxes_xyxy = results[0].boxes.xyxy.cpu().numpy()
+                track_ids = results[0].boxes.id.int().cpu().tolist()
+                confidences = results[0].boxes.conf.cpu().numpy()
+                class_ids = results[0].boxes.cls.int().cpu().tolist()
+                class_names_map = results[0].names # Get class names mapping from results
 
-            active_tracks = new_active_tracks # Update active tracks
+                # --- Store raw frame detections (optional but useful) --- 
+                current_frame_raw_detections = []
+                for i in range(len(track_ids)):
+                    current_frame_raw_detections.append({
+                        'class_name': class_names_map.get(class_ids[i], f'Class_{class_ids[i]}'),
+                        'confidence': float(confidences[i]),
+                        'bbox': boxes_xyxy[i].tolist(),
+                        'track_id': track_ids[i] # Include track ID here too
+                    })
+                if current_frame_raw_detections:
+                     all_frame_detections.append({
+                         'frame': frame_num,
+                         'detections': current_frame_raw_detections
+                     })
+                # --------------------------------------------------------
+                
+                # Plot results on the frame using Ultralytics built-in plot function
+                annotated_frame = results[0].plot() 
 
-            # --- Draw Annotations (Optional - using active_tracks) --- 
-            annotated_frame = frame.copy()
-            # Draw active tracks for visualization
-            for track in active_tracks:
-                 x1, y1, x2, y2 = map(int, track['bbox'])
-                 label = f"{track['class_name']} ID:{track['id']}"
-                 cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                 cv2.putText(annotated_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            # --- End Annotation Drawing --- 
+                # --- Update Track History --- 
+                for i in range(len(track_ids)):
+                    track_id = track_ids[i]
+                    current_track_ids.add(track_id)
+                    bbox = boxes_xyxy[i]
+                    conf = float(confidences[i])
+                    cls_name = class_names_map.get(class_ids[i], f'Class_{class_ids[i]}')
+
+                    track_info = tracked_objects_history[track_id] # Get or create entry
+                    if track_info['start_frame'] == -1: # First time seeing this ID
+                        track_info['start_frame'] = frame_num
+                        track_info['class_name'] = cls_name # Assign class on first sight
+                    
+                    track_info['last_frame'] = frame_num
+                    track_info['duration'] += 1
+                    track_info['bboxes'].append(bbox.tolist()) # Store bbox history
+                    track_info['confidences'].append(conf) # Store confidence history
+                    # Optional: Update class name if it changes and confidence is high?
+                    # if conf > 0.5 and track_info['class_name'] != cls_name:
+                    #    track_info['class_name'] = cls_name
+            else:
+                # No tracks detected in this frame
+                # annotated_frame remains the original frame copy
+                pass
+                
+            # --- End Result Processing --- 
+
+            # --- Draw Track History (Optional - Can make video cluttered) ---
+            # Example: Draw paths for tracks seen in last N frames
+            # for track_id, history in tracked_objects_history.items():
+            #     if frame_num - history['last_frame'] < 10: # Only draw recent paths
+            #         points = np.array([[int((b[0]+b[2])/2), int((b[1]+b[3])/2)] for b in history['bboxes'][-30:]]) # Use centroid
+            #         points = points.reshape((-1, 1, 2))
+            #         cv2.polylines(annotated_frame, [points], isClosed=False, color=(128, 128, 128), thickness=2)
+            # ----------------------------------------------------------------
 
             writer.write(annotated_frame)
 
             # Optional: Log progress
-            if frame_num % 100 == 0: 
-                print(f"[VID_PROC] Processed frame {frame_num}/{total_frames} for Video ID: {video_doc_id}")
+            if frame_num % 100 == 0 and total_frames > 0:
+                logger.info(f"[VID_PROC] Processed frame {frame_num}/{total_frames} for Video ID: {video_doc_id}")
+            elif frame_num % 100 == 0:
+                 logger.info(f"[VID_PROC] Processed frame {frame_num} for Video ID: {video_doc_id}")
 
         # --- End Loop --- 
         
         # --- Filter tracks by duration and finalize unique reports --- 
         final_unique_damage_reports = []
-        for track in active_tracks:
-            # Check if the track met the minimum duration
-            if track.get('duration', 0) >= min_track_duration_frames:
+        min_track_duration_frames = 5 # Keep a minimum duration filter
+        for track_id, track_data in tracked_objects_history.items():
+            if track_data.get('duration', 0) >= min_track_duration_frames:
+                 # Calculate average confidence for this track
+                 avg_conf = sum(track_data['confidences']) / len(track_data['confidences']) if track_data['confidences'] else 0
                  final_unique_damage_reports.append({
-                     'track_id': track['id'],
-                     'class_name': track['class_name'],
-                     'start_frame': track['start_frame'],
-                     'end_frame': track['last_frame'],
-                     'duration_frames': track.get('duration', 0)
+                     'track_id': track_id,
+                     'class_name': track_data['class_name'],
+                     'start_frame': track_data['start_frame'],
+                     'end_frame': track_data['last_frame'],
+                     'duration_frames': track_data.get('duration', 0),
+                     'average_confidence': round(avg_conf, 3)
                  })
+        # Sort reports by start frame
+        final_unique_damage_reports.sort(key=lambda x: x['start_frame'])
         # -------------------------------------------------------------
         
-        print(f"Finished frame processing. Found {len(final_unique_damage_reports)} unique damages meeting duration criteria.")
+        logger.info(f"Finished frame processing. Found {len(final_unique_damage_reports)} unique damages meeting duration criteria ({min_track_duration_frames} frames) using Ultralytics tracker ({tracker_config}).")
         
         # --- Save Final Results --- 
         video_doc_final = Image.objects(id=video_doc_id).first()
         if not video_doc_final:
-             print(f"[VID_PROC ERROR] Cannot find video doc {video_doc_id} before final save.")
+             logger.error(f"[VID_PROC ERROR] Cannot find video doc {video_doc_id} before final save.")
              return 
 
         video_doc_final.processing_status = 'completed'
         video_doc_final.completion_time = datetime.datetime.now()
         video_doc_final.annotated_image_path = annotated_filename # Save ANNOTATED path
         
-        # --- Calculate Final Results (Based on Filtered Tracking) --- 
-        # Consider video damaged if there are ANY unique damages or if total_raw_detections > 0
-        damage_was_detected = bool(final_unique_damage_reports) or total_raw_detections > 0
-        # Confidence needs rethink - maybe max confidence *of the final tracks*?
-        # overall_confidence = max(t.get('max_conf', 0.0) for t in final_unique_damage_reports) if final_unique_damage_reports else 0.0
-        print(f"[VID_PROC] Unique Damage detected (meeting criteria): {damage_was_detected} ({len(final_unique_damage_reports)} instances, {total_raw_detections} raw detections)")
-        # -------------------------------
+        # --- Calculate Final Results --- 
+        damage_was_detected = bool(final_unique_damage_reports)
+        total_tracked_objects = len(tracked_objects_history)
+        logger.info(f"[VID_PROC] Ultralytics Tracking Summary: Damage Detected (meeting criteria): {damage_was_detected} ({len(final_unique_damage_reports)} instances). Total unique tracks initiated: {total_tracked_objects}. Raw Detections recorded across frames: {len(all_frame_detections)} frames.")
+        # -----------------------------
 
         # Update summary message and results
         video_doc_final.prediction_results = {
-             'message': f'Video processing completed. Found {len(final_unique_damage_reports)} unique damage instance(s) meeting criteria (Min Conf: {min_confidence_threshold}, Min Duration: {min_track_duration_frames} frames). Raw Detections: {total_raw_detections}',
-             'unique_damage_count': len(final_unique_damage_reports), # Use count of filtered reports
-             'unique_damage_reports': final_unique_damage_reports, # Store filtered reports
+             'message': f'Video processing completed using Ultralytics tracker ({tracker_config}). Found {len(final_unique_damage_reports)} unique damage instance(s) meeting duration criteria ({min_track_duration_frames} frames). {total_tracked_objects} unique tracks initiated overall.',
+             'unique_damage_count': len(final_unique_damage_reports), 
+             'unique_damage_reports': final_unique_damage_reports, 
              'damage_detected': damage_was_detected,
-             'total_raw_detections': total_raw_detections
+             'all_frame_detections': all_frame_detections, # Raw detections per frame above threshold
+             'tracking_method': f'Ultralytics ({tracker_config})', # Indicate tracking method used
+             'min_duration_filter': min_track_duration_frames,
+             'total_unique_tracks_initiated': total_tracked_objects
              }
         
         # Add processed detail fields
-        video_doc_final.processing_time = (datetime.datetime.now() - video_doc_final.upload_time).total_seconds()
+        # Calculate processing time more accurately
+        if video_doc_final.upload_time:
+             video_doc_final.processing_time = (datetime.datetime.now() - video_doc_final.upload_time).total_seconds()
+        else:
+             logger.warning(f"[VID_PROC WARN] Upload time not set for video {video_doc_id}, cannot calculate processing time.")
+             video_doc_final.processing_time = None
         
-        print(f"Attempting final save for annotated video ID: {video_doc_id}") 
+        logger.info(f"Attempting final save for annotated video ID: {video_doc_id}") 
         video_doc_final.save()
-        print(f"[VID_PROC SUCCESS] Completed processing for video ID: {video_doc_id}")
+        logger.info(f"[VID_PROC SUCCESS] Completed processing for video ID: {video_doc_id}")
 
     except Exception as e:
-        # ... (rest of the error handling remains similar, ensure video_doc_final is used if needed) ...
-        print(f"[VID_PROC ERROR] Error processing video ID {video_doc_id}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"[VID_PROC ERROR] Error processing video ID {video_doc_id}: {e}")
+        logger.error(traceback.format_exc())
         # Try to update status to failed
         try:
             video_doc_fail = Image.objects(id=video_doc_id).first()
@@ -691,11 +803,11 @@ def process_video_async(file_data, video_doc_id, image_type):
                  video_doc_fail.processing_status = 'failed'
                  video_doc_fail.error_message = str(e)
                  video_doc_fail.save()
-                 print(f"[VID_PROC] Updated video ID {video_doc_id} status to failed.")
+                 logger.info(f"[VID_PROC] Updated video ID {video_doc_id} status to failed.")
             else:
-                 print(f"[VID_PROC ERROR] Could not find video doc {video_doc_id} to update status to failed.")
+                 logger.error(f"[VID_PROC ERROR] Could not find video doc {video_doc_id} to update status to failed.")
         except Exception as update_err:
-            print(f"[VID_PROC ERROR] Error updating error status for ID {video_doc_id}: {update_err}")
+            logger.error(f"[VID_PROC ERROR] Error updating error status for ID {video_doc_id}: {update_err}")
             
     finally:
         # Release resources
@@ -703,7 +815,7 @@ def process_video_async(file_data, video_doc_id, image_type):
             cap.release()
         if writer and writer.isOpened():
             writer.release()
-        print(f"[VID_PROC END] Resources released for video ID: {video_doc_id}")
+        logger.info(f"[VID_PROC END] Resources released for video ID: {video_doc_id}")
 
 # --- End Video Processing Function --- 
 
@@ -730,19 +842,18 @@ def upload_video():
                     processing_status='pending' 
                 )
                 initial_entry.save()
-                print(f"Created initial DB entry for VIDEO {original_filename} with ID: {initial_entry.id}")
+                app.logger.info(f"Created initial DB entry for VIDEO {original_filename} with ID: {initial_entry.id}")
                 
                 # Submit video processing task (using the new function)
                 # Pass the selected image_type from the form
                 future = thread_pool.submit(process_video_async, file_data, initial_entry.id, form.image_type.data)
-                print(f"[PID:{os.getpid()}] Submitted ASYNC task for VIDEO {original_filename} (ID: {initial_entry.id}, Type: {form.image_type.data}).") 
+                app.logger.info(f"[PID:{os.getpid()}] Submitted ASYNC task for VIDEO {original_filename} (ID: {initial_entry.id}, Type: {form.image_type.data}).") 
                 uploaded_count += 1
                 
             except Exception as e:
                 failed_count += 1
-                print(f"Failed to initiate processing for VIDEO {original_filename}: {str(e)}")
-                import traceback
-                traceback.print_exc()
+                app.logger.error(f"Failed to initiate processing for VIDEO {original_filename}: {str(e)}")
+                app.logger.error(traceback.format_exc())
         
         if uploaded_count > 0:
             flash(f'{uploaded_count} video(s) uploaded and queued for processing.', 'success')
@@ -776,7 +887,7 @@ def check_processing_status():
         recently_finished_items = Image.objects(
              user_id=user_id,
              processing_status__in=['completed', 'failed'],
-        ).exclude('prediction_results.raw_predictions').limit(10)  # Limit to last 10 for efficiency
+        ).exclude('prediction_results').limit(10)  # Limit to last 10 for efficiency
 
         status_list = [] 
         # Add currently processing items
@@ -859,6 +970,7 @@ def image_details(image_id):
                 # --- END FIX --- 
             except Exception as e:
                 app.logger.error(f'Error generating recommendations within image_details for {image_id}: {str(e)}')
+                app.logger.error(traceback.format_exc()) # Log full traceback
                 flash(f'Could not generate recommendations: {str(e)}', 'warning') 
                 # Continue rendering the page without recommendations
         # --- End Edit ---
@@ -1098,221 +1210,401 @@ def bhuvan_proxy(tile_path):
 @app.route('/analytics')
 @login_required
 def analytics():
+    app.logger.info("--- Entering /analytics route ---") # Add entry log
     query = {}
+    user_id_for_log = 'admin' # Default for admin
     if not current_user.is_admin:
         user_id_str = current_user.get_id()
+        user_id_for_log = user_id_str # Log the actual user ID
         try:
             user_id_obj = ObjectId(user_id_str)
-            query['$or'] = [{'user_id': user_id_str}, {'user_id': user_id_obj}]
-        except Exception:
-            query['user_id'] = user_id_str
+            # Correct query for ObjectId or string representation if needed
+            query['user_id'] = user_id_obj # Assume user_id is stored as ObjectId
+        except Exception as e:
+            app.logger.error(f"Error converting user ID {user_id_str} to ObjectId: {e}")
+            # Fallback or handle error appropriately - maybe query by string if conversion fails?
+            # For now, assume it's ObjectId and proceed
+            query['user_id'] = user_id_obj
 
     try:
-        # Get all images
-        images = Image.objects(query)
-        
+        # Fetch all relevant images ONCE
+        app.logger.info(f"Analytics: Executing query for user '{user_id_for_log}': {query}") # Log query
+        images = list(Image.objects(**query).exclude('prediction_results.all_frame_detections')) # Exclude potentially large field
+        total_images = len(images)
+        app.logger.info(f"Analytics: Found {total_images} images for user '{user_id_for_log}'.") # Log count found
+
         if not images:
+            app.logger.warning(f"Analytics: No images found for user '{user_id_for_log}', rendering 'No Data'.") # Log reason for no data
             return render_template('analytics.html', has_data=False)
 
-        # Basic stats
-        detection_stats = {
-            'total': len(images),
-            'damage_detected': sum(1 for img in images 
-                                 if img.processing_status == 'completed' 
-                                 and img.prediction_results and img.prediction_results.get('damage_detected', False)),
-            'failed': sum(1 for img in images if img.processing_status == 'failed'),
-            'processing': sum(1 for img in images if img.processing_status in ['pending', 'processing'])
+        # --- Initialize data structures ---
+        daily_distribution_data = defaultdict(int)
+        daily_activity_data = defaultdict(int)
+        processing_time_by_type_data = defaultdict(list)
+        confidence_by_type_data = defaultdict(list)
+        damage_type_counts = defaultdict(int)
+        severity_by_type_data = defaultdict(lambda: defaultdict(int))
+        location_based_stats = defaultdict(lambda: {
+            'total': 0,
+            'damage_detected': 0,
+            'confidence_sum': 0.0,
+            'confidence_count': 0,
+            'processing_time_sum': 0.0,
+            'processing_time_count': 0,
+            'severity_counts': defaultdict(int),
+            'damage_types': defaultdict(int),
+            'coords': []
+        })
+        # Use timezone-aware datetime objects
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        confidence_over_time_data = defaultdict(lambda: {'conf_sum': 0.0, 'count': 0})
+        image_type_counts = defaultdict(int) # For Processing Time chart x-axis labels
+
+        # Get date range for last 30 days (using timezone-aware dates)
+        today = now_utc.date()
+        thirty_days_ago = today - datetime.timedelta(days=30)
+        date_range_30_days = [(today - datetime.timedelta(days=x)) for x in range(30)]
+
+        # Initialize time-based charts with zeros
+        for date_obj in date_range_30_days:
+            date_str = date_obj.strftime('%Y-%m-%d')
+            daily_distribution_data[date_str] = 0
+            # Ensure confidence_over_time_data is initialized correctly
+            confidence_over_time_data[date_str] = {'conf_sum': 0.0, 'count': 0}
+
+        # --- FIX for Template Error: Recreate detection_stats ---
+        # Initialize with default values first
+        detection_stats_for_template = {
+            'total': total_images,
+            'damage_detected': 0, 
+            'failed': 0,
+            'processing': total_images, # Assume all processing initially
+            'success_rate': 0,
+            'detection_rate': 0
+        }
+        # --- END FIX ---
+
+        # --- Single Iteration over Images ---
+        completed_count = 0
+        failed_count = 0
+        processing_count = 0
+        detected_damage_count = 0
+
+        for img in images:
+            # Status counts
+            if img.processing_status == 'completed':
+                completed_count += 1
+            elif img.processing_status == 'failed':
+                failed_count += 1
+            else: # pending or processing
+                processing_count += 1
+
+            # --- Time Distribution ---
+            upload_time_utc = None
+            if img.upload_time:
+                # Assume stored time is UTC if naive, otherwise use existing timezone
+                if img.upload_time.tzinfo is None:
+                    upload_time_utc = img.upload_time.replace(tzinfo=datetime.timezone.utc)
+                else:
+                    upload_time_utc = img.upload_time.astimezone(datetime.timezone.utc)
+
+                # Daily Activity (Weekday)
+                day_name = calendar.day_name[upload_time_utc.weekday()]
+                daily_activity_data[day_name] += 1
+                # Daily Distribution (Last 30 Days)
+                upload_date = upload_time_utc.date()
+                if upload_date >= thirty_days_ago:
+                     date_str = upload_date.strftime('%Y-%m-%d')
+                     # Use setdefault to ensure the key exists before incrementing
+                     daily_distribution_data.setdefault(date_str, 0)
+                     daily_distribution_data[date_str] += 1
+
+            # --- Processing Time (only for completed) ---
+            proc_time = None
+            if img.processing_status == 'completed' and img.completion_time and upload_time_utc:
+                completion_time_utc = None
+                if img.completion_time.tzinfo is None:
+                     completion_time_utc = img.completion_time.replace(tzinfo=datetime.timezone.utc)
+                else:
+                     completion_time_utc = img.completion_time.astimezone(datetime.timezone.utc)
+
+                proc_time = (completion_time_utc - upload_time_utc).total_seconds()
+                if 0 < proc_time < 7200: # Allow up to 2 hours
+                     img_type = img.image_type or 'Unknown'
+                     processing_time_by_type_data[img_type].append(proc_time)
+                     image_type_counts[img_type]+=1
+                else:
+                    proc_time = None # Discard unreasonable times
+
+            # --- Damage, Confidence, Severity (only for completed) ---
+            damage_type = 'None'
+            confidence = 0.0
+            severity = 'Unknown'
+            is_damage_detected = False
+
+            if img.processing_status == 'completed' and img.prediction_results:
+                pred_results = img.prediction_results
+                is_damage_detected = pred_results.get('damage_detected', False)
+
+                if is_damage_detected:
+                    detected_damage_count += 1 # Increment overall damage count
+                    # Determine damage type
+                    damage_type = pred_results.get('damage_type', img.image_type or 'Unknown')
+                    if not damage_type: damage_type = 'Unknown' # Ensure not None or empty
+
+                    # Get confidence score
+                    confidence = img.confidence_score or 0.0
+                    # Fallback needed? Check if confidence_score is reliably populated
+                    # If not, calculate from raw_predictions if necessary (omitted for brevity now)
+
+                    # --- Calculate severity based on metrics ---
+                    # This requires calling calculate_defect_metrics for every damaged image
+                    # Ensure calculate_defect_metrics handles potential errors gracefully
+                    try:
+                         defect_metrics = calculate_defect_metrics(img)
+                         severity = defect_metrics.get('severity', 'Low')
+                    except Exception as metrics_err:
+                         app.logger.error(f"Error calculating defect metrics for image {img.id}: {metrics_err}")
+                         severity = 'Unknown' # Assign Unknown if calculation fails
+                    # -----------------------------------------
+
+                    damage_type_counts[damage_type] += 1
+                    if confidence > 0: # Only include valid confidence scores
+                        confidence_by_type_data[damage_type].append(confidence)
+                    severity_by_type_data[damage_type][severity] += 1
+
+                    # Confidence Over Time (only for damaged images with valid confidence and time)
+                    if confidence > 0 and upload_time_utc:
+                        upload_date = upload_time_utc.date()
+                        if upload_date >= thirty_days_ago:
+                             date_str = upload_date.strftime('%Y-%m-%d')
+                             # Use setdefault for nested dict
+                             conf_time_entry = confidence_over_time_data.setdefault(date_str, {'conf_sum': 0.0, 'count': 0})
+                             conf_time_entry['conf_sum'] += confidence
+                             conf_time_entry['count'] += 1
+                # else: No damage detected for this completed image
+
+            if not is_damage_detected and img.processing_status == 'completed':
+                 damage_type_counts['None'] += 1 # Count non-damaged completed images
+
+            # --- Location Analysis (only for completed with location) ---
+            if img.processing_status == 'completed' and img.location:
+                loc_info = img.location
+                lat = loc_info.get('latitude')
+                lon = loc_info.get('longitude')
+
+                if lat is not None and lon is not None:
+                    # Determine location key
+                    city = loc_info.get('city', 'Unknown')
+                    state = loc_info.get('state', 'Unknown')
+                    loc_key = "Unknown Location" # Default
+
+                    # Prioritize city, state format
+                    if city and city != 'Unknown':
+                        loc_key = city
+                        if state and state != 'Unknown' and state != city:
+                            loc_key = f"{city}, {state}"
+                    elif state and state != 'Unknown':
+                         loc_key = state # Use state if city unknown
+                    else:
+                         try:
+                             # Fallback to coordinates string if no names
+                             loc_key = f"Coords({round(float(lat), 3)}, {round(float(lon), 3)})"
+                         except (ValueError, TypeError):
+                              loc_key = "Invalid Coords" # Handle non-float coords
+
+                    # Update stats for this location key
+                    stats = location_based_stats[loc_key]
+                    stats['total'] += 1
+                    try:
+                         stats['coords'].append({'lat': float(lat), 'lng': float(lon)})
+                    except (ValueError, TypeError):
+                         pass # Skip adding invalid coords
+
+                    if is_damage_detected:
+                        stats['damage_detected'] += 1
+                        if confidence > 0: # Only add valid confidence
+                            stats['confidence_sum'] += confidence
+                            stats['confidence_count'] += 1
+                        stats['severity_counts'][severity] += 1
+                        stats['damage_types'][damage_type] += 1
+
+                    if proc_time is not None: # Use valid processing time
+                        stats['processing_time_sum'] += proc_time
+                        stats['processing_time_count'] += 1
+
+        # --- End Loop ---
+
+        # --- Post-Processing Calculations ---
+        app.logger.info("Analytics: Starting post-processing calculations.")
+
+        # Processing Time by Type
+        avg_time_by_type_final = {}
+        total_proc_time_sum = 0
+        total_proc_time_count = 0
+        for img_type, times in processing_time_by_type_data.items():
+            if times:
+                 avg = sum(times) / len(times)
+                 avg_time_by_type_final[img_type] = round(avg, 2)
+                 total_proc_time_sum += sum(times)
+                 total_proc_time_count += len(times)
+            else:
+                 avg_time_by_type_final[img_type] = 0
+        # Ensure all types encountered are present
+        for img_type in image_type_counts:
+            avg_time_by_type_final.setdefault(img_type, 0)
+
+        # Avg Confidence by Type
+        avg_confidence_by_type_final = {}
+        for d_type, conf_list in confidence_by_type_data.items():
+             if conf_list:
+                 avg_conf = sum(conf_list) / len(conf_list)
+                 # Confidence score is 0-1, convert to percentage for display
+                 avg_confidence_by_type_final[d_type] = round(avg_conf * 100, 1)
+             else:
+                 avg_confidence_by_type_final.setdefault(d_type, 0)
+        # Ensure all damage types are present (excluding 'None')
+        for d_type in damage_type_counts:
+            if d_type != 'None':
+                 avg_confidence_by_type_final.setdefault(d_type, 0)
+
+        # Damage Type Distribution (ensure 'None' is included if present)
+        damage_type_distribution_final = dict(damage_type_counts)
+
+        # Confidence Over Time Trend
+        confidence_trend_final = {}
+        # Ensure keys exist for all dates in range and sort chronologically
+        sorted_dates = sorted(date_range_30_days)
+        for date_obj in sorted_dates:
+            date_str = date_obj.strftime('%Y-%m-%d')
+            data = confidence_over_time_data.get(date_str, {'conf_sum': 0.0, 'count': 0}) # Use get with default
+            avg_conf = (data['conf_sum'] / data['count'] * 100) if data['count'] > 0 else 0
+            confidence_trend_final[date_str] = round(avg_conf, 1)
+
+        # Geographical Damage Distribution (Location vs Counts)
+        geo_distribution_final = {}
+        for loc_key, stats in location_based_stats.items():
+            geo_distribution_final[loc_key] = {
+                'total': stats['total'],
+                'damaged': stats['damage_detected']
+            }
+
+        # Geographic Risk Assessment (Table Data) & Top Risk Areas
+        risk_assessment_entries = []
+        for loc_key, stats in location_based_stats.items():
+            if stats['total'] == 0: continue # Skip locations with no images somehow
+
+            avg_conf = (stats['confidence_sum'] / stats['confidence_count'] * 100) if stats['confidence_count'] > 0 else 0
+            avg_proc = (stats['processing_time_sum'] / stats['processing_time_count']) if stats['processing_time_count'] > 0 else 0
+            damage_rate = (stats['damage_detected'] / stats['total'] * 100) if stats['total'] > 0 else 0
+
+            # Calculate Risk Score (Example logic)
+            risk_score = 0
+            risk_score += damage_rate / 5 # Higher damage rate increases score
+            risk_score += stats['severity_counts'].get('High', 0) * 5 # High severity adds more
+            risk_score += stats['severity_counts'].get('Medium', 0) * 2 # Medium severity adds less
+            risk_score += avg_conf / 20 # Higher avg confidence might indicate denser/clearer damage
+
+            # Determine Risk Level String
+            risk_level = "Low"
+            if risk_score > 15: risk_level = "High" # Adjusted threshold
+            elif risk_score > 5: risk_level = "Medium" # Adjusted threshold
+
+            risk_assessment_entries.append({
+                'location': loc_key,
+                'total_inspections': stats['total'],
+                'damage_detected': stats['damage_detected'],
+                'damage_rate': round(damage_rate, 1), # Add damage rate
+                'avg_confidence': round(avg_conf, 1),
+                'avg_processing_time': round(avg_proc, 2),
+                'risk_level': risk_level,
+                'risk_score': risk_score # Keep score for sorting
+            })
+
+        # Sort by risk score (descending) for the table and top areas
+        risk_assessment_entries.sort(key=lambda x: x['risk_score'], reverse=True)
+        # Final table data (without score)
+        geographic_risk_assessment_final = [{k: v for k, v in entry.items() if k != 'risk_score'} for entry in risk_assessment_entries]
+        # Top 5 Risk Areas data (simple format for chart)
+        top_risk_areas_final = [{'name': entry['location'], 'score': round(entry['risk_score'],1)} for entry in risk_assessment_entries[:5]]
+
+        # System Reliability (Success Rate based on completed vs total)
+        system_reliability = (completed_count / total_images * 100) if total_images > 0 else 100
+
+        # Overall Stats Card Data
+        stats_summary = {
+            'total_inspections': total_images,
+            'damage_detection_rate': (detected_damage_count / completed_count * 100) if completed_count > 0 else 0,
+            'avg_processing_time': (total_proc_time_sum / total_proc_time_count) if total_proc_time_count > 0 else 0,
+            'system_reliability': system_reliability
         }
 
-        # Add success rate to stats
-        completed_images = sum(1 for img in images if img.processing_status == 'completed')
-        detection_stats['success_rate'] = (completed_images / detection_stats['total'] * 100) if detection_stats['total'] > 0 else 0
-        detection_stats['detection_rate'] = (detection_stats['damage_detected'] / completed_images * 100) if completed_images > 0 else 0
+        # --- FIX for Template Error: Re-calculate detection_stats ---
+        # Update the initialized dict with calculated values
+        detection_stats_for_template['damage_detected'] = detected_damage_count
+        detection_stats_for_template['failed'] = failed_count
+        detection_stats_for_template['processing'] = processing_count # Actual pending/processing
+        detection_stats_for_template['success_rate'] = stats_summary['system_reliability']
+        detection_stats_for_template['detection_rate'] = stats_summary['damage_detection_rate']
+        # total remains as total_images from initialization
+        # --- END FIX ---
 
-        # Processing Time Analysis
-        valid_times = []
-        time_by_type = defaultdict(list)
-        
-        # Calculate the processing time by using completion_time - upload_time for completed images
-        for img in images:
-            if img.processing_status == 'completed' and img.completion_time and img.upload_time:
-                # Calculate processing time in seconds
-                proc_time = (img.completion_time - img.upload_time).total_seconds()
-                img_type = img.image_type or 'Unknown'
-                
-                if 0 < proc_time < 3600:  # Reasonable time limit (1 hour max)
-                    valid_times.append(proc_time)
-                    time_by_type[img_type].append(proc_time)
+        # Daily Activity (Weekday) - ensure correct order
+        sorted_daily_activity = {day: daily_activity_data.get(day, 0) for day in calendar.day_name}
 
-        processing_times = {
-            'avg_time': sum(valid_times) / len(valid_times) if valid_times else 0,
-            'max_time': max(valid_times) if valid_times else 0,
-            'min_time': min(valid_times) if valid_times else 0
-        }
+        # Daily Distribution (Last 30 days) - ensure correct date order
+        sorted_daily_distribution = {date_obj.strftime('%Y-%m-%d'): daily_distribution_data.get(date_obj.strftime('%Y-%m-%d'), 0) for date_obj in sorted_dates}
 
-        # Average time by type
-        avg_time_by_type = {
-            img_type: sum(times) / len(times) if times else 0
-            for img_type, times in time_by_type.items()
-        }
+        app.logger.info(f"Analytics: Data processing complete. Passing {len(geographic_risk_assessment_final)} locations to template.")
 
-        # Damage Analysis
-        damage_types = defaultdict(int)
-        confidence_by_type = defaultdict(list)
-        severity_by_type = defaultdict(lambda: defaultdict(int))
-
-        for img in images:
-            pred_results = img.prediction_results
-            if pred_results:  # Remove the damage_detected condition
-                damage_type = pred_results.get('damage_type', 'Unknown')
-                confidence = pred_results.get('confidence', 0)
-                severity = pred_results.get('damage_severity', 'Unknown')
-                
-                # Count all damage types
-                damage_types[damage_type] += 1
-                confidence_by_type[damage_type].append(confidence)
-                severity_by_type[damage_type][severity] += 1
-
-        # Calculate average confidence by type
-        avg_confidence_by_type = {
-            d_type: sum(conf) / len(conf) if conf else 0
-            for d_type, conf in confidence_by_type.items()
-        }
-
-        # Time Distribution Analysis
-        daily_activity = defaultdict(int)
-        daily_distribution = defaultdict(int)
-        
-        # Get date range for last 30 days
-        today = datetime.datetime.now().date()
-        date_range = [(today - datetime.timedelta(days=x)).strftime('%Y-%m-%d') for x in range(30)]
-        
-        # Initialize daily_distribution with zeros for all dates
-        for date in date_range:
-            daily_distribution[date] = 0
-        
-        # Count uploads for each date
-        for img in images:
-            upload_time = img.upload_time
-            if upload_time:
-                # Get day of the week (0 = Monday, 6 = Sunday)
-                day_num = upload_time.weekday()
-                day_name = calendar.day_name[day_num]
-                daily_activity[day_name] += 1
-                
-                # Format date as YYYY-MM-DD
-                date_str = upload_time.strftime('%Y-%m-%d')
-                if date_str in daily_distribution:
-                    daily_distribution[date_str] += 1
-
-        # Sort days of week in correct order
-        sorted_daily_activity = {day: daily_activity[day] for day in calendar.day_name}
-
-        # Sort daily distribution by date
-        sorted_daily_distribution = dict(sorted(daily_distribution.items()))
-
-        # Location Analysis
-        location_stats = []
-        for img in images:
-            metadata = img.metadata
-            location_name = metadata.get('location_name', 'Unknown')
-            pred_results = img.prediction_results
-            
-            # Find existing location or create new one
-            loc_stat = next((loc for loc in location_stats if loc['_id'] == location_name), None)
-            if not loc_stat:
-                loc_stat = {
-                    '_id': location_name,
-                    'count': 0,
-                    'damage_detected': 0,
-                    'confidence_sum': 0,
-                    'confidence_count': 0,
-                    'processing_time_sum': 0,
-                    'processing_time_count': 0
-                }
-                location_stats.append(loc_stat)
-            
-            # Update stats
-            loc_stat['count'] += 1
-            if pred_results.get('damage_detected'):
-                loc_stat['damage_detected'] += 1
-            
-            confidence = pred_results.get('confidence')
-            if confidence is not None:
-                loc_stat['confidence_sum'] += confidence
-                loc_stat['confidence_count'] += 1
-            
-            proc_time = img.processing_time
-            if proc_time and isinstance(proc_time, (int, float, str)):
-                try:
-                    proc_time_float = float(proc_time)
-                    if 0 < proc_time_float < 3600:
-                        loc_stat['processing_time_sum'] += proc_time_float
-                        loc_stat['processing_time_count'] += 1
-                except (ValueError, TypeError):
-                    continue
-
-        # Calculate averages for location stats
-        for loc in location_stats:
-            loc['avg_confidence'] = (loc['confidence_sum'] / loc['confidence_count'] * 100 
-                                   if loc['confidence_count'] > 0 else 0)
-            loc['avg_processing_time'] = (loc['processing_time_sum'] / loc['processing_time_count']
-                                        if loc['processing_time_count'] > 0 else 0)
-            # Clean up temporary fields
-            del loc['confidence_sum'], loc['confidence_count']
-            del loc['processing_time_sum'], loc['processing_time_count']
-
-        # Error Analysis
-        error_analysis = []
-        error_counts = defaultdict(int)
-        error_times = defaultdict(list)
-        
-        for img in images:
-            if img.processing_status == 'failed':
-                error = img.error_message or 'Unknown Error'
-                proc_time = img.processing_time or 0
-                error_counts[error] += 1
-                error_times[error].append(float(proc_time) if proc_time else 0)
-        
-        if error_counts:
-            for error, count in error_counts.items():
-                times = error_times[error]
-                error_analysis.append({
-                    'type': error,
-                    'count': count,
-                    'avg_time_impact': sum(times) / len(times) if times else 0
-                })
-        else:
-            # If no errors, create informative placeholder data for visualization
-            error_analysis = [
-                {'type': 'System Performance', 'count': 50, 'avg_time_impact': 0},
-                {'type': 'Data Quality', 'count': 20, 'avg_time_impact': 0},
-                {'type': 'Network Issues', 'count': 15, 'avg_time_impact': 0},
-                {'type': 'Model Accuracy', 'count': 10, 'avg_time_impact': 0},
-                {'type': 'Other', 'count': 5, 'avg_time_impact': 0}
-            ]
-
+        # Pass the FINAL data structures to the template
         return render_template('analytics.html',
             has_data=True,
-            detection_stats=detection_stats,
-            processing_times=processing_times,
-            avg_time_by_type=avg_time_by_type,
-            damage_types=dict(damage_types),
-            severity_by_type=dict(severity_by_type),
-            avg_confidence_by_type=avg_confidence_by_type,
-            daily_activity=sorted_daily_activity,
+            stats_summary=stats_summary, # Keep the new summary
+            detection_stats=detection_stats_for_template, # Pass the reconstructed old stats for template compatibility
+            # Chart Data
             daily_distribution=sorted_daily_distribution,
-            location_stats=location_stats,
-            error_analysis=error_analysis)
+            daily_activity=sorted_daily_activity,
+            processing_time_by_type=avg_time_by_type_final,
+            avg_confidence_by_type=avg_confidence_by_type_final,
+            damage_type_distribution=damage_type_distribution_final,
+            confidence_trend=confidence_trend_final,
+            geographical_distribution=geo_distribution_final,
+            top_risk_areas=top_risk_areas_final,
+            # Table Data
+            geographic_risk_assessment=geographic_risk_assessment_final,
+            # Make sure all necessary variables are passed
+        )
 
     except Exception as e:
-        print(f"Error in analytics route: {str(e)}")
+        app.logger.error(f"Error in analytics route: {str(e)}")
         import traceback
-        traceback.print_exc()
-        return render_template('analytics.html', 
-                             has_data=False, 
-                             error_message=str(e),
-                             show_error=True)
+        app.logger.error(traceback.format_exc()) # Log the full traceback
+        return render_template('analytics.html',
+                             has_data=False,
+                             error_message=f"An error occurred while generating analytics: {str(e)}", # Pass error message
+                             show_error=True,
+                             # --- FIX: Pass default data in except block --- 
+                             stats_summary={}, 
+                             # Pass the initialized empty stats dict here too
+                             detection_stats={'total': 0, 'damage_detected': 0, 'failed': 0, 'processing': 0, 'success_rate': 0, 'detection_rate': 0}, 
+                             daily_distribution={}, 
+                             daily_activity={}, 
+                             processing_time_by_type={}, 
+                             avg_confidence_by_type={}, 
+                             # --- FIX: Add missing default --- 
+                             avg_time_by_type={}, 
+                             # --- END FIX --- 
+                             damage_type_distribution={}, 
+                             confidence_trend={}, 
+                             geographical_distribution={}, 
+                             top_risk_areas=[], 
+                             geographic_risk_assessment=[],
+                             # ADD DEFAULTS FOR MISSING VARIABLES
+                             processing_times={'avg_time': 0, 'median_time': 0, 'min_time': 0, 'max_time': 0}, # Added default
+                             damage_types=[] # Added default
+                             # --- END FIX --- 
+                             )
 
 @app.route('/delete_stuck_images', methods=['POST'])
 @login_required
@@ -1709,10 +2001,10 @@ def purge_all_data():
     
     return redirect(url_for('dashboard'))
 
-@app.route('/region_analytics')
+@app.route('/state_analytics') # Renamed route
 @login_required
-def region_analytics():
-    """Provide analytics based on regional clustering of defects by distance"""
+def state_analytics(): # Renamed function
+    """Provide analytics based on statewide damage data, aggregated by state.""" # Updated docstring
     query = {}
     if not current_user.is_admin:
         user_id_str = current_user.get_id()
@@ -1723,152 +2015,162 @@ def region_analytics():
             query['user_id'] = user_id_str
 
     try:
-        # Get clustering distance from request, default to 5km
-        cluster_distance_km = float(request.args.get('distance', 5))
-        
-        # Get all images with location data
+        # Fetch completed images with valid location (including state)
         images = Image.objects(query).filter(
-            location__exists=True, 
-            processing_status='completed',
-            prediction_results__damage_detected=True  # Only get images with damage
-        )
+            location__exists=True,
+            location__state__exists=True, # Ensure state field exists
+            processing_status='completed'
+        ).exclude('prediction_results.all_frame_detections') # Exclude large field
+
+        app.logger.info(f"State Analytics: Found {len(images)} completed images with location for potential analysis.")
+
+        # --- Group images by state and calculate stats ---
+        state_stats = defaultdict(lambda: {
+            'total_images': 0,
+            'damage_detected_count': 0,
+            'damage_types': defaultdict(int),
+            'confidence_sum': 0.0,
+            'confidence_count': 0,
+            'severity_counts': defaultdict(int),
+            'total_area_m2': 0.0,
+            'total_depth_cm': 0.0,
+            'depth_count': 0,
+            'coords': [] # Store first coords for map marker
+        })
         
-        app.logger.info(f"Found {len(images)} images with damage for region analytics")
-        
-        if not images:
-            return render_template('region_analytics.html', has_data=False)
-        
-        # Prepare data for clustering
-        points = []
+        valid_images_for_stats = 0
+        processed_states = set()
+
         for img in images:
-            if img.location and 'latitude' in img.location and 'longitude' in img.location:
-                lat = img.location.get('latitude')
-                lng = img.location.get('longitude')
+            # Ensure state is valid and not empty/None/'Unknown'
+            state = img.location.get('state')
+            if not state or state == 'Unknown':
+                continue # Skip images without a valid state
+
+            # --- Ensure lat/lng are valid floats before adding coords ---
+            lat = img.location.get('latitude')
+            lng = img.location.get('longitude')
+            valid_coords = False
+            try:
                 if lat is not None and lng is not None:
-                    # Store image information with coordinates
-                    damage_type = "Unknown"
-                    if img.prediction_results:
-                        damage_type = img.prediction_results.get('damage_type', img.image_type)
-                    elif img.image_type:
-                        damage_type = img.image_type
-                    
-                    points.append({
-                        'id': str(img.id),
-                        'lat': float(lat),
-                        'lng': float(lng),
-                        'damage_type': damage_type,
-                        'confidence': img.confidence_score or 0.0,
-                        # --- Add Location Info --- 
-                        'state': img.location.get('state', 'Unknown'),
-                        'city': img.location.get('city', 'Unknown'),
-                        'road_name': img.location.get('road_name'), # <<< ADD road_name extraction
-                        # --- End Add --- 
-                        'file_path': img.file_path,
-                        'upload_time': img.upload_time
-                    })
-        
-        # Perform clustering by distance
-        clusters = cluster_by_distance(points, cluster_distance_km)
-        
-        # Analyze clusters
-        cluster_analytics = []
-        for i, cluster in enumerate(clusters):
-            # Find center of cluster
-            if not cluster:
-                continue
+                    lat = float(lat)
+                    lng = float(lng)
+                    valid_coords = True
+            except (ValueError, TypeError):
+                 pass # Invalid coords, don't add them
+            # --- End coord validation ---
+
+            stats = state_stats[state]
+            stats['total_images'] += 1
+            valid_images_for_stats += 1
+            processed_states.add(state)
+
+            # Store coords of first valid image for map marker
+            if valid_coords and not stats['coords']:
+                 stats['coords'] = [{'lat': lat, 'lng': lng}]
+
+            # Check for detected damage
+            damage_detected = False
+            primary_damage_type = 'None'
+            confidence = 0.0
+            severity = 'Low' # Default if no damage or metrics fail
+
+            if img.prediction_results and img.prediction_results.get('damage_detected'):
+                damage_detected = True
+                stats['damage_detected_count'] += 1
                 
-            cluster_center = calculate_cluster_center(cluster)
-            
-            # Count damage types within cluster
-            damage_counts = defaultdict(int)
-            total_confidence = 0
-            for point in cluster:
-                damage_counts[point['damage_type']] += 1
-                total_confidence += point['confidence']
-            
-            # Calculate average confidence
-            avg_confidence = total_confidence / len(cluster) if cluster else 0
-            
-            # Find most common damage type
-            primary_damage = max(damage_counts.items(), key=lambda x: x[1])[0] if damage_counts else "Unknown"
-            
-            # --- Determine Cluster Name --- 
-            cluster_name = f"Segment #{i}" # Default
-            # Prioritize road name if available
-            # Use the road_name extracted earlier
-            road_names_in_cluster = [p.get('road_name') for p in cluster if p.get('road_name')] # <<< Use extracted road_name
-            cities_in_cluster = [p.get('city') for p in cluster if p.get('city') and p.get('city') != 'Unknown']
-            states_in_cluster = [p.get('state') for p in cluster if p.get('state') and p.get('state') != 'Unknown']
+                # Use calculated metrics for severity, area, depth
+                try:
+                    metrics = calculate_defect_metrics(img)
+                    primary_damage_type = metrics.get('damage_type', 'Unknown')
+                    severity = metrics.get('severity', 'Low')
+                    area_m2 = metrics.get('area_m2', 0.0)
+                    depth_cm = metrics.get('depth_cm', 0.0)
+                    
+                    stats['total_area_m2'] += area_m2
+                    if depth_cm > 0:
+                        stats['total_depth_cm'] += depth_cm
+                        stats['depth_count'] += 1
+                        
+                except Exception as metrics_err:
+                    app.logger.error(f"Error calculating metrics for {img.id} in state {state}: {metrics_err}")
+                    # Fallback using basic info if metrics fail
+                    primary_damage_type = img.prediction_results.get('damage_type', img.image_type or 'Unknown')
+                    severity = 'Unknown' # Indicate metrics failed
 
-            from collections import Counter
-            if road_names_in_cluster:
-                most_common_road = Counter(road_names_in_cluster).most_common(1)[0][0]
-                cluster_name = most_common_road
-            elif cities_in_cluster:
-                most_common_city = Counter(cities_in_cluster).most_common(1)[0][0]
-                cluster_name = most_common_city
-                # Optionally add state if available and different from city
-                if states_in_cluster:
-                    most_common_state = Counter(states_in_cluster).most_common(1)[0][0]
-                    if most_common_state and most_common_state != most_common_city:
-                         cluster_name += f", {most_common_state}"
-            elif states_in_cluster: # Fallback to state if no city or road name
-                most_common_state = Counter(states_in_cluster).most_common(1)[0][0]
-                if most_common_state:
-                    cluster_name = most_common_state
-            # --- End Determine Name ---
+                stats['damage_types'][primary_damage_type if primary_damage_type else 'Unknown'] += 1
+                stats['severity_counts'][severity] += 1
 
-            # Add cluster analytics
-            cluster_analytics.append({
-                'id': i,
-                'name': cluster_name, # <<< Use determined Name
-                'center': cluster_center,
-                'point_count': len(cluster),
-                'primary_damage': primary_damage,
-                'damage_types': dict(damage_counts),
-                'avg_confidence': avg_confidence * 100,  # Convert to percentage
-                'radius_km': cluster_distance_km,
-                'severity': calculate_cluster_severity(cluster, cluster_distance_km)
-            })
+                # Add confidence score if available
+                conf_score = img.confidence_score or 0.0
+                if conf_score > 0:
+                    stats['confidence_sum'] += conf_score
+                    stats['confidence_count'] += 1
+            else:
+                 # Still count non-damaged images towards totals
+                 stats['damage_types']['None'] += 1 # Count non-damaged
+                 # Severity is considered 'Low' implicitly if no damage
 
-        # --- Apply Filters ---
-        selected_severity = request.args.get('severity')
-        selected_damage_type = request.args.get('damage_type')
+        if valid_images_for_stats == 0:
+             app.logger.warning("State Analytics: No images with valid state information found.")
+             return render_template('state_analytics.html', has_data=False)
 
-        filtered_clusters = cluster_analytics
-        if selected_severity and selected_severity != 'all': # Add check for 'all'
-            filtered_clusters = [c for c in filtered_clusters if c['severity'] == selected_severity]
-            app.logger.info(f"Filtering by severity: {selected_severity}, {len(filtered_clusters)} clusters remaining")
+        # --- Post-process state stats ---
+        final_state_stats = {}
+        for state, stats in state_stats.items():
+            damage_rate = (stats['damage_detected_count'] / stats['total_images'] * 100) if stats['total_images'] > 0 else 0
+            avg_confidence = (stats['confidence_sum'] / stats['confidence_count'] * 100) if stats['confidence_count'] > 0 else 0 # Percentage
+            avg_depth = (stats['total_depth_cm'] / stats['depth_count']) if stats['depth_count'] > 0 else 0.0
 
-        if selected_damage_type and selected_damage_type != 'all': # Add check for 'all'
-            filtered_clusters = [
-                c for c in filtered_clusters
-                if selected_damage_type in c['damage_types']
-            ]
-            app.logger.info(f"Filtering by damage type: {selected_damage_type}, {len(filtered_clusters)} clusters remaining")
-        # --- End Apply Filters ---
+            final_state_stats[state] = {
+                'total_images': stats['total_images'],
+                'damage_detected_count': stats['damage_detected_count'],
+                'damage_rate': round(damage_rate, 1),
+                'avg_confidence': round(avg_confidence, 1),
+                'damage_types': dict(stats['damage_types']), # Convert defaultdict
+                'severity_counts': dict(stats['severity_counts']), # Convert defaultdict
+                'total_area_m2': round(stats['total_area_m2'], 2),
+                'avg_depth_cm': round(avg_depth, 1),
+                'coords': stats['coords'][0] if stats['coords'] else None # Pass first coord dict or None
+            }
 
-        app.logger.info(f"Generated {len(cluster_analytics)} clusters, {len(filtered_clusters)} after filtering for region analytics")
+        # Sort stats by state name
+        sorted_final_stats = dict(sorted(final_state_stats.items()))
+        
+        # Calculate overall summary
+        total_states_analyzed = len(sorted_final_stats)
+        overall_total_images = sum(s['total_images'] for s in sorted_final_stats.values())
+        overall_damage_count = sum(s['damage_detected_count'] for s in sorted_final_stats.values())
+        overall_damage_rate = (overall_damage_count / overall_total_images * 100) if overall_total_images > 0 else 0
+        
+        state_with_highest_rate = {'name': 'N/A', 'rate': 0}
+        if sorted_final_stats:
+            highest = max(sorted_final_stats.items(), key=lambda item: item[1]['damage_rate'])
+            state_with_highest_rate = {'name': highest[0], 'rate': highest[1]['damage_rate']}
 
-        return render_template('region_analytics.html',
+        overall_summary = {
+             'total_states': total_states_analyzed,
+             'total_images': overall_total_images,
+             'overall_damage_rate': round(overall_damage_rate, 1),
+             'highest_damage_state': state_with_highest_rate['name'],
+             'highest_damage_rate': state_with_highest_rate['rate'],
+        }
+
+        app.logger.info(f"State Analytics: Prepared data for {len(sorted_final_stats)} states.")
+        
+        return render_template('state_analytics.html',
                               has_data=True,
-                              clusters=filtered_clusters, # Use filtered list
-                              cluster_distance=cluster_distance_km,
-                              # Pass filter values back to template to maintain state
-                              selected_severity=selected_severity or 'all', # Default to 'all' if None
-                              selected_damage_type=selected_damage_type or 'all', # Default to 'all' if None
-                              # --- Add State Stats ---
-                              # state_stats=sorted_stats_by_state
-                              # --- End Add ---
+                              state_stats=sorted_final_stats, # Pass processed stats
+                              overall_summary=overall_summary # Pass overall summary
                              )
 
     except Exception as e:
-        app.logger.error(f"Error in region analytics route: {str(e)}")
+        app.logger.error(f"Error in state analytics route: {str(e)}")
         import traceback
         app.logger.error(traceback.format_exc())
-        return render_template('region_analytics.html',
+        return render_template('state_analytics.html', # Keep template name
                              has_data=False,
-                             error_message="An error occurred while generating analytics.", # Generic message
+                             error_message="An error occurred while generating state analytics.", # Updated message
                              show_error=True)
 
 def calculate_cluster_center(points):
@@ -1945,7 +2247,7 @@ def calculate_cluster_severity(cluster, cluster_distance_km):
     density = len(cluster) / area
     
     # Average confidence
-    avg_confidence = sum(p['confidence'] for p in cluster) / len(cluster)
+    avg_confidence = sum((p.confidence_score or 0.0) for p in cluster) / len(cluster)
     
     # Determine severity based on density and confidence
     if density > 0.5 and avg_confidence > 0.7:
@@ -1956,217 +2258,423 @@ def calculate_cluster_severity(cluster, cluster_distance_km):
         return "Low"
 
 def calculate_defect_metrics(image):
-    """Calculate area, depth, and other metrics for defects.
-    Tries to use pre-calculated accurate values if available in raw_predictions,
-    otherwise falls back to rough estimations.
+    """Calculate area, depth, severity, and other metrics for defects.
+    Prioritizes using accurate metrics (area_m2, depth_cm) if available in raw_predictions.
     """
+    # Initialize with defaults
     defect_metrics = {
-        'area_m2': 0,
-        'depth_cm': 0, # Represents average/representative depth
+        'area_m2': 0.0,
+        'depth_cm': 0.0, 
+        'volume_m3': 0.0,
         'severity': 'Low',
-        'confidence': image.confidence_score or 0,
-        'damage_type': 'Unknown' # Add damage type here
+        'confidence': image.confidence_score or 0.0,
+        'damage_type': 'Unknown',
+        'calculation_method': 'None' # Track how metrics were calculated
     }
     
     try:
+        if not image.prediction_results or image.processing_status != 'completed':
+            app.logger.warning(f"Skipping metrics calculation for {image.id}: No results or not completed.")
+            defect_metrics['calculation_method'] = 'Skipped (No Data)'
+            return defect_metrics # Return default if no results
+
         raw_predictions = image.prediction_results.get('raw_predictions', [])
-        metadata = image.metadata or {}
-        img_width = metadata.get('width', 0)
-        img_height = metadata.get('height', 0)
-        
-        # --- Try to get aggregated accurate metrics first ---
-        total_accurate_area_m2 = 0
+        if not raw_predictions:
+            app.logger.info(f"No raw predictions found for {image.id}. Using defaults.")
+            defect_metrics['calculation_method'] = 'Skipped (No Detections)'
+            return defect_metrics # Return default if no detections
+
+        # --- Aggregate Metrics from Raw Predictions ---
+        total_accurate_area_m2 = 0.0
         depths_cm = []
         damage_types = set()
         has_accurate_metrics = False
+        calculation_method = 'Fallback Estimation' # Default if specific keys aren't found
 
-        if raw_predictions:
-            # Check if the first prediction has the enhanced keys
-            first_pred = raw_predictions[0]
-            if 'accurate_area_m2' in first_pred and 'estimated_depth_cm' in first_pred:
-                 has_accurate_metrics = True
-                 
-            for pred in raw_predictions:
-                damage_types.add(pred.get('class_name', 'Unknown'))
-                if has_accurate_metrics:
-                    total_accurate_area_m2 += pred.get('accurate_area_m2', 0)
-                    depths_cm.append(pred.get('estimated_depth_cm', 0))
-                # else: we will use estimations later
+        # Check if the first prediction has the enhanced keys we expect
+        first_pred = raw_predictions[0]
+        if 'accurate_area_m2' in first_pred and 'estimated_depth_cm' in first_pred:
+            has_accurate_metrics = True
+            calculation_method = 'MiDaS Enhanced'
+            app.logger.info(f"Detected accurate metrics (MiDaS Enhanced) for image {image.id}")
+        else:
+            app.logger.warning(f"Accurate metrics (accurate_area_m2, estimated_depth_cm) not found in raw_predictions for image {image.id}. Will use Fallback Estimation.")
 
+        for pred in raw_predictions:
+            # Always collect damage types
+            damage_types.add(pred.get('class_name', 'Unknown'))
+
+            if has_accurate_metrics:
+                area_m2 = pred.get('accurate_area_m2', 0.0)
+                depth_cm = pred.get('estimated_depth_cm', 0.0)
+                total_accurate_area_m2 += area_m2 if area_m2 is not None else 0.0
+                if depth_cm is not None and depth_cm > 0: # Only consider valid depths
+                    depths_cm.append(depth_cm)
+            # else: Fallback logic will be applied later if needed
+
+        # --- Assign Aggregated Values (Prioritize Accurate) ---
         if has_accurate_metrics:
-            defect_metrics['area_m2'] = round(total_accurate_area_m2, 2)
+            defect_metrics['area_m2'] = round(total_accurate_area_m2, 3)
             if depths_cm:
-                 # Use average depth for overall metric
-                 defect_metrics['depth_cm'] = round(np.mean([d for d in depths_cm if d is not None]), 1)
-            has_metrics = True # Mark that we got metrics this way
-        
-        # --- Fallback to rough estimations if no accurate metrics ---
-        if not has_accurate_metrics and raw_predictions and img_width > 0 and img_height > 0:
-            app.logger.info(f"Falling back to rough estimations for image {image.id}")
-            # Estimate pixel to meter conversion (ROUGH)
-            estimated_road_width_m = 3.5
-            estimated_pixels_per_meter = img_width / estimated_road_width_m
+                # Use average of valid depths found
+                defect_metrics['depth_cm'] = round(np.mean(depths_cm), 1)
+            # else: depth_cm remains 0.0
+            defect_metrics['calculation_method'] = calculation_method
             
-            total_area_pixels = 0
-            for pred in raw_predictions:
-                bbox = pred.get('bbox', [0, 0, 0, 0])
-                if len(bbox) == 4:
-                    width = bbox[2] - bbox[0]
-                    height = bbox[3] - bbox[1]
-                    total_area_pixels += width * height
-            
-            if estimated_pixels_per_meter > 0:
-                area_m2_est = total_area_pixels / (estimated_pixels_per_meter ** 2)
-                defect_metrics['area_m2'] = round(area_m2_est, 2)
+        # --- Fallback Estimation (If Accurate Metrics Weren't Available) ---
+        elif raw_predictions: # Only run fallback if there were predictions but no accurate keys
+            calculation_method = 'Bounding Box Estimation'
+            app.logger.warning(f"Executing Fallback Estimation for image {image.id}")
+            metadata = image.metadata or {}
+            img_width = metadata.get('width', 0)
+            img_height = metadata.get('height', 0)
 
-            # Crude depth estimation based on overall confidence and primary type
-            confidence = defect_metrics['confidence']
+            if img_width > 0 and img_height > 0:
+                estimated_road_width_m = 4.0 
+                estimated_pixels_per_meter = img_width / estimated_road_width_m
+                
+                total_bbox_area_pixels = 0
+                max_confidence = 0.0
+                for pred in raw_predictions:
+                    bbox = pred.get('bbox', [0, 0, 0, 0])
+                    if len(bbox) == 4:
+                        width = bbox[2] - bbox[0]
+                        height = bbox[3] - bbox[1]
+                        total_bbox_area_pixels += width * height
+                    max_confidence = max(max_confidence, pred.get('confidence', 0.0))
+                
+                if estimated_pixels_per_meter > 0:
+                    area_m2_est = total_bbox_area_pixels / (estimated_pixels_per_meter ** 2)
+                    defect_metrics['area_m2'] = round(area_m2_est, 3)
+                # else: area remains 0.0
+
+                # Crude depth estimation based on confidence and estimated area
+                primary_damage_type_fallback = image.prediction_results.get('damage_type', 'Unknown') 
+                if not primary_damage_type_fallback or primary_damage_type_fallback == 'Unknown':
+                    if damage_types: primary_damage_type_fallback = list(damage_types)[0] # Use first detected type
+                
+                depth_cm_est = 0
+                confidence = max_confidence # Use max confidence from bboxes
+                if 'Pothole' in primary_damage_type_fallback:
+                    depth_cm_est = (confidence * 5) + (defect_metrics['area_m2'] * 2) 
+                    depth_cm_est = min(depth_cm_est, 15) # Cap fallback depth at 15cm
+                elif 'Crack' in primary_damage_type_fallback:
+                    depth_cm_est = confidence * 3
+                    depth_cm_est = min(depth_cm_est, 5) # Cap crack depth est
+                defect_metrics['depth_cm'] = round(depth_cm_est, 1)
+                defect_metrics['calculation_method'] = calculation_method
+            else:
+                 app.logger.warning(f"Cannot perform Fallback Estimation for {image.id}: Missing image dimensions.")
+                 defect_metrics['calculation_method'] = 'Skipped (Missing Dims)'
+        # --- End Fallback --- 
+
+        # --- Determine Primary Damage Type (Consolidated) ---
+        primary_damage_type = 'Unknown'
+        if len(damage_types) == 1:
+            primary_damage_type = list(damage_types)[0]
+        elif len(damage_types) > 1:
+            # Use the type determined during processing if available, else 'Mixed'
+            primary_damage_type = image.prediction_results.get('damage_type', 'Mixed')
+        else:
+            # Fallback if damage_types set is empty for some reason
             primary_damage_type = image.prediction_results.get('damage_type', image.image_type or 'Unknown')
-            depth_cm_est = 0
-            if 'Pothole' in primary_damage_type:
-                depth_cm_est = confidence * 10
-            elif 'Crack' in primary_damage_type:
-                depth_cm_est = confidence * 3
-            defect_metrics['depth_cm'] = round(depth_cm_est, 1)
-            
-        # --- Determine overall severity (always calculate this) ---
-        if defect_metrics['area_m2'] > 1.0 or defect_metrics['depth_cm'] > 5.0:
+        # Ensure it's not None or empty string
+        defect_metrics['damage_type'] = primary_damage_type if primary_damage_type else 'Unknown'
+
+        # --- Calculate Severity (Based on final area/depth) ---
+        if defect_metrics['area_m2'] > 1.5 or defect_metrics['depth_cm'] > 7.0:
             defect_metrics['severity'] = 'High'
-        elif defect_metrics['area_m2'] > 0.5 or defect_metrics['depth_cm'] > 2.0:
+        elif defect_metrics['area_m2'] > 0.5 or defect_metrics['depth_cm'] > 3.0:
             defect_metrics['severity'] = 'Medium'
         else:
             defect_metrics['severity'] = 'Low'
-
-        # --- Determine primary damage type ---
-        if len(damage_types) == 1:
-             defect_metrics['damage_type'] = list(damage_types)[0]
-        elif len(damage_types) > 1:
-             # If multiple types, use the one from prediction_results if available, else 'Mixed'
-             defect_metrics['damage_type'] = image.prediction_results.get('damage_type', 'Mixed')
-        else:
-             # Fallback if no types found in raw_predictions
-             defect_metrics['damage_type'] = image.prediction_results.get('damage_type', image.image_type or 'Unknown')
+        # Adjust severity for Alligator cracking - always at least Medium if area > 0.1
+        if 'Alligator' in defect_metrics['damage_type'] and defect_metrics['area_m2'] > 0.1 and defect_metrics['severity'] == 'Low':
+            defect_metrics['severity'] = 'Medium'
              
-        # Ensure 'Unknown' is used if type is None or empty string
-        if not defect_metrics['damage_type']:
-             defect_metrics['damage_type'] = 'Unknown'
+        # --- Calculate Volume (Only for Potholes, using final area/depth) ---
+        if 'Pothole' in defect_metrics['damage_type'] and defect_metrics['area_m2'] > 0 and defect_metrics['depth_cm'] > 0:
+            # Volume (m3) = Area (m2) * Depth (m)
+            volume_m3 = defect_metrics['area_m2'] * (defect_metrics['depth_cm'] / 100.0)
+            defect_metrics['volume_m3'] = round(volume_m3, 4) # Increase precision for volume
+        # else: volume remains 0.0
 
-
-        app.logger.info(f"Calculated defect metrics for {image.id}: {defect_metrics}")
+        app.logger.info(f"Calculated defect metrics for {image.id} (Method: {defect_metrics['calculation_method']}): {defect_metrics}")
         return defect_metrics
     
     except Exception as e:
-        app.logger.error(f"Error calculating defect metrics for {image.id}: {str(e)}\\n{traceback.format_exc()}")
-        # Return default metrics with error noted, potentially add error key
+        app.logger.error(f"Error calculating defect metrics for {image.id}: {str(e)}\n{traceback.format_exc()}")
+        # Return default metrics with error noted
         defect_metrics['error'] = str(e) 
+        defect_metrics['calculation_method'] = 'Error'
         return defect_metrics
 
 def generate_recommendations(metrics):
-    """Generate repair recommendations based on calculated metrics"""
+    """Generate repair recommendations based on calculated metrics, including material suggestions and structured cost estimation."""
     recommendations = []
     
-    # Use metrics directly passed in
+    # Extract metrics for clarity
     damage_type = metrics.get('damage_type', 'Unknown')
     severity = metrics.get('severity', 'Low')
-    area_m2 = metrics.get('area_m2', 0)
-    depth_cm = metrics.get('depth_cm', 0)
+    area_m2 = metrics.get('area_m2', 0.0)
+    depth_cm = metrics.get('depth_cm', 0.0)
+    volume_m3 = metrics.get('volume_m3', 0.0) # Volume specifically for Potholes
+    calculation_method = metrics.get('calculation_method', 'Unknown')
 
-    # Helper function for cost estimation
-    def estimate_cost(base_cost_per_unit, area, depth=None):
-        # Example: Increase cost quadratically with area and linearly with depth
-        cost = base_cost_per_unit * (area ** 1.2)
-        if depth and depth > 0:
-            cost *= (1 + depth / 10) # Increase cost based on depth
-            
-        # --- Add Scaling Factor (assume base cost is in hundreds) ---
-        scaled_cost = cost * 100 
-        # --- End Add Scaling Factor ---
+    # --- Costing Parameters (Move to config or constants file later?) ---
+    # Material Costs (Example values in ₹ per unit)
+    COST_HOT_MIX_ASPHALT_PER_M3 = 12000 
+    COST_COLD_MIX_ASPHALT_PER_M3 = 9000 
+    COST_CRACK_SEALANT_PER_METER = 150 # Assume cracks are treated linearly for cost
+    COST_SURFACE_TREATMENT_PER_M2 = 500 # For sealing larger areas
+    COST_MILLING_PER_M2 = 300
+    
+    # Labor Costs (Example values in ₹)
+    LABOR_BASE_RATE_PER_JOB = 3000 # Base mobilization/setup
+    LABOR_RATE_PER_M2_PATCHING = 800
+    LABOR_RATE_PER_METER_CRACK_SEAL = 50
+    LABOR_RATE_PER_M2_OVERLAY = 600
+    
+    # Equipment Costs (Example - simplified)
+    EQUIPMENT_BASE_COST = 2000 
+    EQUIPMENT_HEAVY_DUTY_ADDON = 5000 # For milling/deep patching
+    
+    # Minimum total cost
+    MINIMUM_REPAIR_COST = 5000 
+    # --------------------------------------------------------------------
+
+    # --- Helper Function for Cost Estimation (More Structured) ---
+    def estimate_structured_cost(repair_type, area, depth=None, volume=None, crack_length_est=None):
+        material_cost = 0
+        labor_cost = LABOR_BASE_RATE_PER_JOB
+        equipment_cost = EQUIPMENT_BASE_COST
+        cost_details = [] # To explain the calculation
+
+        if repair_type == 'Full Depth Patch':
+            if volume and volume > 0:
+                 material_cost = volume * COST_HOT_MIX_ASPHALT_PER_M3
+                 cost_details.append(f"Material (Hot Mix): {volume:.3f} m³ * ₹{COST_HOT_MIX_ASPHALT_PER_M3}/m³ = ₹{material_cost:.0f}")
+            else: # Fallback if volume is zero but area/depth exist
+                 est_volume = area * (depth / 100.0) if depth else area * 0.05 # Assume 5cm depth if unknown
+                 material_cost = est_volume * COST_HOT_MIX_ASPHALT_PER_M3
+                 cost_details.append(f"Material (Hot Mix, Est.): {est_volume:.3f} m³ * ₹{COST_HOT_MIX_ASPHALT_PER_M3}/m³ = ₹{material_cost:.0f}")
+            labor_cost += area * LABOR_RATE_PER_M2_PATCHING
+            equipment_cost += EQUIPMENT_HEAVY_DUTY_ADDON # Needs heavy equipment
+            cost_details.append(f"Labor (Base + Patching): ₹{LABOR_BASE_RATE_PER_JOB} + {area:.2f} m² * ₹{LABOR_RATE_PER_M2_PATCHING}/m² = ₹{labor_cost:.0f}")
+            cost_details.append(f"Equipment (Base + Heavy): ₹{EQUIPMENT_BASE_COST} + ₹{EQUIPMENT_HEAVY_DUTY_ADDON} = ₹{equipment_cost:.0f}")
         
-        # --- Change currency symbol to INR --- 
-        # --- Apply scaling and ensure minimum --- 
-        return f'₹{max(5000, int(scaled_cost))}' # Minimum cost of ₹5000 
-        # --- End Change & Apply Scaling ---
+        elif repair_type == 'Partial Depth Patch (Hot Mix)':
+             # Assume partial depth uses roughly 60% of full volume?
+             est_volume = (volume * 0.6) if volume and volume > 0 else (area * (depth / 100.0) * 0.6 if depth else area * 0.03)
+             material_cost = est_volume * COST_HOT_MIX_ASPHALT_PER_M3
+             cost_details.append(f"Material (Hot Mix, Partial): {est_volume:.3f} m³ * ₹{COST_HOT_MIX_ASPHALT_PER_M3}/m³ = ₹{material_cost:.0f}")
+             labor_cost += area * LABOR_RATE_PER_M2_PATCHING * 0.8 # Slightly less labor?
+             equipment_cost += EQUIPMENT_HEAVY_DUTY_ADDON * 0.5 # Less heavy equip? 
+             cost_details.append(f"Labor (Base + Patching): ₹{LABOR_BASE_RATE_PER_JOB} + {area:.2f} m² * ₹{LABOR_RATE_PER_M2_PATCHING*0.8}/m² = ₹{labor_cost:.0f}")
+             cost_details.append(f"Equipment (Base + Medium): ₹{EQUIPMENT_BASE_COST} + ₹{EQUIPMENT_HEAVY_DUTY_ADDON*0.5} = ₹{equipment_cost:.0f}")
 
+        elif repair_type == 'Surface Patch (Cold Mix)':
+             # Assume cold mix uses less volume
+             est_volume = (volume * 0.4) if volume and volume > 0 else (area * (depth / 100.0) * 0.4 if depth else area * 0.02)
+             material_cost = est_volume * COST_COLD_MIX_ASPHALT_PER_M3
+             cost_details.append(f"Material (Cold Mix): {est_volume:.3f} m³ * ₹{COST_COLD_MIX_ASPHALT_PER_M3}/m³ = ₹{material_cost:.0f}")
+             labor_cost += area * LABOR_RATE_PER_M2_PATCHING * 0.6 # Less labor
+             # Basic equipment cost only
+             cost_details.append(f"Labor (Base + Patching): ₹{LABOR_BASE_RATE_PER_JOB} + {area:.2f} m² * ₹{LABOR_RATE_PER_M2_PATCHING*0.6}/m² = ₹{labor_cost:.0f}")
+             cost_details.append(f"Equipment (Base): ₹{equipment_cost:.0f}")
+
+        elif repair_type == 'Mill and Overlay':
+            # Cost based on area
+            material_cost = area * COST_SURFACE_TREATMENT_PER_M2 # Simplified overlay material cost
+            milling_cost = area * COST_MILLING_PER_M2
+            cost_details.append(f"Material (Overlay): {area:.2f} m² * ₹{COST_SURFACE_TREATMENT_PER_M2}/m² = ₹{material_cost:.0f}")
+            cost_details.append(f"Milling: {area:.2f} m² * ₹{COST_MILLING_PER_M2}/m² = ₹{milling_cost:.0f}")
+            labor_cost += area * LABOR_RATE_PER_M2_OVERLAY
+            equipment_cost += EQUIPMENT_HEAVY_DUTY_ADDON # Milling needs heavy equipment
+            cost_details.append(f"Labor (Base + Overlay): ₹{LABOR_BASE_RATE_PER_JOB} + {area:.2f} m² * ₹{LABOR_RATE_PER_M2_OVERLAY}/m² = ₹{labor_cost:.0f}")
+            cost_details.append(f"Equipment (Base + Heavy): ₹{EQUIPMENT_BASE_COST} + ₹{EQUIPMENT_HEAVY_DUTY_ADDON} = ₹{equipment_cost:.0f}")
+            material_cost += milling_cost # Add milling to material/prep cost
+        
+        elif repair_type == 'Rout and Seal' or repair_type == 'Crack Sealing':
+            # Estimate crack length based on area (highly approximate)
+            # Assume average crack width (e.g., 1cm = 0.01m), length = area / width
+            est_length_m = crack_length_est if crack_length_est else (area / 0.01 if area > 0 else 10) # Default 10m if area 0?
+            est_length_m = max(1.0, est_length_m) # Min 1m length
+            material_cost = est_length_m * COST_CRACK_SEALANT_PER_METER
+            cost_details.append(f"Material (Sealant): {est_length_m:.1f} m * ₹{COST_CRACK_SEALANT_PER_METER}/m = ₹{material_cost:.0f}")
+            labor_cost += est_length_m * LABOR_RATE_PER_METER_CRACK_SEAL
+            # Basic equipment for sealing
+            cost_details.append(f"Labor (Base + Sealing): ₹{LABOR_BASE_RATE_PER_JOB} + {est_length_m:.1f} m * ₹{LABOR_RATE_PER_METER_CRACK_SEAL}/m = ₹{labor_cost:.0f}")
+            cost_details.append(f"Equipment (Base): ₹{equipment_cost:.0f}")
+            if repair_type == 'Rout and Seal':
+                 equipment_cost += 500 # Add small cost for routing equipment
+                 cost_details.append(f"Equipment Addon (Routing): ₹500")
+
+        elif repair_type == 'Surface Treatment Seal': # For larger alligator areas not needing milling
+             material_cost = area * COST_SURFACE_TREATMENT_PER_M2
+             cost_details.append(f"Material (Surface Seal): {area:.2f} m² * ₹{COST_SURFACE_TREATMENT_PER_M2}/m² = ₹{material_cost:.0f}")
+             labor_cost += area * LABOR_RATE_PER_M2_OVERLAY * 0.5 # Less labor than full overlay
+             # Basic equipment
+             cost_details.append(f"Labor (Base + Sealing): ₹{LABOR_BASE_RATE_PER_JOB} + {area:.2f} m² * ₹{LABOR_RATE_PER_M2_OVERLAY*0.5}/m² = ₹{labor_cost:.0f}")
+             cost_details.append(f"Equipment (Base): ₹{equipment_cost:.0f}")
+
+        else: # Default/Unknown
+            cost_details.append("Requires On-Site Assessment for Accurate Costing.")
+            return 'Requires Assessment', cost_details
+
+        total_cost = material_cost + labor_cost + equipment_cost
+        # Apply minimum cost
+        final_cost = max(MINIMUM_REPAIR_COST, total_cost)
+        cost_details.append(f"Subtotal: ₹{total_cost:.0f}")
+        if final_cost == MINIMUM_REPAIR_COST and total_cost < MINIMUM_REPAIR_COST:
+            cost_details.append(f"Applied Minimum Job Cost: ₹{MINIMUM_REPAIR_COST:.0f}")
+            
+        return f'₹{int(final_cost)}', cost_details # Return integer value for display
+    # --- End Cost Helper --- 
+
+    # --- Recommendation Logic --- 
     if 'Pothole' in damage_type:
+        # Define materials based on repair type
+        material_high = "High-Performance Hot Mix Asphalt (HMA) - e.g., Polymer Modified Binder (PMB)"
+        material_medium = "Standard Hot Mix Asphalt (HMA) - e.g., VG30/VG40 Grade Bitumen"
+        material_low = "Cold Mix Asphalt Patching Compound"
+        
         if severity == 'High' or depth_cm > 7 or area_m2 > 2:
+            repair_type = 'Full Depth Patch'
+            cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2, depth_cm, volume=volume_m3)
             recommendations.append({
-                'title': 'Full Depth Patching',
-                'description': f'Critical Pothole ({area_m2:.1f} m², {depth_cm:.1f} cm depth). Requires removing damaged pavement to stable base and replacing with new asphalt material.',
+                'title': repair_type,
+                'description': f'Critical Pothole ({area_m2:.2f} m², {depth_cm:.1f} cm depth, {volume_m3:.4f} m³ volume). Requires removing damaged pavement down to a stable base and replacing with new, compacted asphalt layers.',
                 'urgency': 'High',
-                'estimated_cost': estimate_cost(150, area_m2, depth_cm)
+                'materials': material_high,
+                'estimated_cost': cost,
+                'cost_breakdown': cost_breakdown
             })
-        elif severity == 'Medium' or depth_cm > 4 or area_m2 > 1:
+        elif severity == 'Medium' or depth_cm > 3 or area_m2 > 0.5: # Lowered threshold slightly
+            repair_type = 'Partial Depth Patch (Hot Mix)'
+            cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2, depth_cm, volume=volume_m3)
             recommendations.append({
-                'title': 'Partial Depth Patching with Hot Mix',
-                'description': f'Significant Pothole ({area_m2:.1f} m², {depth_cm:.1f} cm depth). Clean, prepare, and fill the pothole with hot mix asphalt.',
+                'title': repair_type,
+                'description': f'Significant Pothole ({area_m2:.2f} m², {depth_cm:.1f} cm depth, {volume_m3:.4f} m³ volume). Requires cleaning, squaring edges, applying tack coat, and filling with compacted hot mix asphalt.',
                 'urgency': 'Medium',
-                'estimated_cost': estimate_cost(100, area_m2, depth_cm)
+                'materials': material_medium,
+                'estimated_cost': cost,
+                'cost_breakdown': cost_breakdown
             })
         else:
+            repair_type = 'Surface Patch (Cold Mix)'
+            cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2, depth_cm, volume=volume_m3)
             recommendations.append({
-                'title': 'Surface Patching with Cold Mix',
-                'description': f'Minor Pothole ({area_m2:.1f} m², {depth_cm:.1f} cm depth). Fill pothole with cold mix asphalt for temporary repair or low-traffic areas.',
+                'title': repair_type,
+                'description': f'Minor Pothole ({area_m2:.2f} m², {depth_cm:.1f} cm depth). Suitable for temporary repair or low-traffic areas. Clean, fill with cold mix compound, and compact.',
                 'urgency': 'Low',
-                'estimated_cost': estimate_cost(60, area_m2, depth_cm)
+                'materials': material_low,
+                'estimated_cost': cost,
+                'cost_breakdown': cost_breakdown
             })
     
     elif 'Crack' in damage_type:
-        # Crack recommendations can also depend on crack width, which isn't currently calculated
+        material_sealant = "Flexible Polymer-Modified Bitumen Sealant or Rubberized Asphalt Sealant"
+        material_overlay = "Standard Hot Mix Asphalt (HMA) Overlay (e.g., 40-50mm thickness)"
+        material_patch_seal = "Slurry Seal or Microsurfacing Treatment"
+        
+        # Estimate crack length for costing (very rough)
+        estimated_crack_length_m = area_m2 / 0.01 if area_m2 > 0.01 else None # Assume 1cm avg width
+        
         if 'Alligator' in damage_type:
-            if severity == 'High' or area_m2 > 5:
+            if severity == 'High' or area_m2 > 5: # Needs structural repair
+                repair_type = 'Mill and Overlay'
+                cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2)
                 recommendations.append({
-                    'title': 'Mill and Overlay (Alligator Cracking)',
-                    'description': f'Extensive alligator cracking ({area_m2:.1f} m²). Remove distressed layer and replace with new asphalt overlay.',
+                    'title': f'{repair_type} (Alligator Cracking)',
+                    'description': f'Extensive alligator cracking ({area_m2:.2f} m²), indicating base fatigue. Requires milling the distressed layer(s) and applying a new structural asphalt overlay.',
                     'urgency': 'High',
-                    'estimated_cost': estimate_cost(120, area_m2)
+                    'materials': f"Milling Debris Removal + {material_overlay}",
+                    'estimated_cost': cost,
+                    'cost_breakdown': cost_breakdown
                 })
-            else:
+            else: # Medium severity alligator cracking
+                repair_type = 'Surface Treatment Seal'
+                cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2)
                 recommendations.append({
-                    'title': 'Surface Patch or Seal (Alligator Cracking)',
-                    'description': f'Moderate alligator cracking ({area_m2:.1f} m²). Apply a surface patch or structural sealing treatment.',
+                    'title': f'{repair_type} (Alligator Cracking)',
+                    'description': f'Moderate alligator cracking ({area_m2:.2f} m²). Apply a structural surface treatment (e.g., Slurry Seal, Microsurfacing) to seal cracks and prevent water ingress.',
                     'urgency': 'Medium',
-                    'estimated_cost': estimate_cost(70, area_m2)
+                    'materials': material_patch_seal,
+                    'estimated_cost': cost,
+                    'cost_breakdown': cost_breakdown
                 })
         elif any(x in damage_type for x in ['Longitudinal', 'Transverse']):
-            if severity == 'High' or area_m2 > 2: # Consider crack width/length if available
+            # Use depth_cm as proxy for crack width/severity if area is small
+            is_wide_crack = depth_cm > 1.5 # Treat depth > 1.5cm as a wider crack needing routing
+            if severity == 'High' or is_wide_crack:
+                 repair_type = 'Rout and Seal'
+                 cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2, crack_length_est=estimated_crack_length_m)
                  recommendations.append({
-                    'title': 'Rout and Seal Cracks',
-                    'description': f'Significant linear cracking ({area_m2:.1f} m²). Rout cracks and seal with flexible sealant to prevent water intrusion.',
-                    'urgency': 'High',
-                    'estimated_cost': estimate_cost(50, area_m2)
+                    'title': f'{repair_type} (Linear Cracks)',
+                    'description': f'Significant or wide linear cracking ({area_m2:.2f} m², Depth Proxy: {depth_cm:.1f} cm). Cracks should be routed/widened to create a reservoir, cleaned, and filled with flexible sealant.',
+                    'urgency': 'High' if severity == 'High' else 'Medium', # Wide cracks are medium urgency
+                    'materials': material_sealant,
+                    'estimated_cost': cost,
+                    'cost_breakdown': cost_breakdown
                 })
-            else:
+            else: # Minor/narrow cracks
+                 repair_type = 'Crack Sealing'
+                 cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2, crack_length_est=estimated_crack_length_m)
                  recommendations.append({
-                    'title': 'Crack Sealing',
-                    'description': f'Minor linear cracking ({area_m2:.1f} m²). Clean and seal cracks with appropriate sealant.',
-                    'urgency': 'Medium' if severity == 'Medium' else 'Low',
-                    'estimated_cost': estimate_cost(30, area_m2)
+                    'title': f'{repair_type} (Linear Cracks)',
+                    'description': f'Minor linear cracking ({area_m2:.2f} m², Depth Proxy: {depth_cm:.1f} cm). Clean cracks thoroughly and apply sealant to prevent water intrusion.',
+                    'urgency': 'Low',
+                    'materials': material_sealant,
+                    'estimated_cost': cost,
+                    'cost_breakdown': cost_breakdown
                 })
         else: # Other crack types
+             repair_type = 'Crack Sealing (General)'
+             cost, cost_breakdown = estimate_structured_cost(repair_type, area_m2, crack_length_est=estimated_crack_length_m)
              recommendations.append({
-                'title': 'Crack Sealing (General)',
-                'description': f'General cracking detected ({area_m2:.1f} m²). Clean and seal cracks with appropriate sealant.',
+                'title': repair_type,
+                'description': f'General cracking detected ({area_m2:.2f} m²). Requires cleaning and sealing with appropriate sealant.',
                 'urgency': severity,
-                'estimated_cost': estimate_cost(35, area_m2)
+                'materials': material_sealant,
+                'estimated_cost': cost,
+                'cost_breakdown': cost_breakdown
             })
     
-    else: # Unknown damage type
+    else: # Unknown or other damage types
+        cost, cost_breakdown = estimate_structured_cost('Unknown', area_m2)
         recommendations.append({
             'title': 'On-Site Inspection Required',
-            'description': f'Unknown damage type ({area_m2:.1f} m²). Conduct detailed on-site inspection to determine appropriate repair method.',
+            'description': f'Damage type uncertain or not categorized ({damage_type}, Area: {area_m2:.2f} m², Severity: {severity}). A detailed on-site inspection by a qualified engineer is required to determine the exact nature and extent of the damage and recommend the appropriate repair method.',
             'urgency': severity,
-            'estimated_cost': 'Requires Assessment'
+            'materials': 'To be determined after inspection',
+            'estimated_cost': cost, # Still show 'Requires Assessment'
+            'cost_breakdown': cost_breakdown
         })
     
-    # Add preventative maintenance if not high severity
-    if severity != 'High':
+    # Add general monitoring recommendation if not High urgency
+    high_urgency_present = any(rec['urgency'] == 'High' for rec in recommendations)
+    if not high_urgency_present:
         recommendations.append({
             'title': 'Preventative Maintenance Monitoring',
-            'description': 'Recommend regular monitoring as part of preventative maintenance schedule to track further deterioration.',
-            'urgency': 'Low',
-            'estimated_cost': 'Included in Maintenance Plan'
+            'description': f'Current defect severity is {severity}. Recommend regular monitoring (e.g., annually or semi-annually) as part of a preventative maintenance schedule to track any deterioration and address issues proactively.',
+            'urgency': 'Info',
+            'materials': 'N/A',
+            'estimated_cost': 'N/A',
+            'cost_breakdown': ['Part of standard road maintenance plan.']
         })
-    
+
+    # Add note about calculation method if not ideal
+    if calculation_method != 'MiDaS Enhanced' and calculation_method != 'None':
+         recommendations.append({
+             'title': 'Note on Metrics Accuracy',
+             'description': f'The area/depth metrics used for these recommendations were based on {calculation_method}. Accuracy may be limited compared to MiDaS-enhanced or on-site measurements. Consider field verification for high-cost repairs.',
+             'urgency': 'Info',
+             'materials': 'N/A',
+             'estimated_cost': 'N/A',
+             'cost_breakdown': []
+         })
+            
     return recommendations
 
 def estimate_road_life(metrics):
@@ -2281,7 +2789,9 @@ def generate_life_estimate_notes(damage_type, metrics):
 def create_boolean_mask_from_polygon(polygon_points, shape):
     """Create a boolean NumPy mask from a list of polygon points."""
     mask = np.zeros(shape, dtype=np.uint8)
-    if polygon_points and len(polygon_points) > 0:
+    # --- FIX: Correct check for NumPy array --- 
+    if polygon_points is not None and polygon_points.size > 0:
+    # --- END FIX ---
         try:
             # Convert points to NumPy array of int32, required by fillPoly
             pts = np.array(polygon_points, dtype=np.int32)
@@ -2292,22 +2802,252 @@ def create_boolean_mask_from_polygon(polygon_points, shape):
             return np.zeros(shape, dtype=bool)
     return mask.astype(bool)
 
-def calibrate_midas_depth(relative_depth):
-    """Placeholder function to calibrate MiDaS relative depth to cm.
-    !!! THIS IS A PLACEHOLDER - REQUIRES REAL CALIBRATION !!!
-    It currently applies an arbitrary scaling factor.
+# --- Start: Updated Depth Calibration Function (from depth.py) ---
+def calibrate_midas_depth(inputs):
+    """Estimate metric depth (cm) based on MiDaS relative depth contrast within the mask.
+    Compares percentile depth inside the mask to median depth at the boundary.
+    !!! Requires tuning of SCALING_FACTOR based on real-world examples !!!
     """
-    # Example: Simple linear scaling (adjust factor based on experimentation)
-    scaling_factor = 15 # Completely arbitrary - adjust this!
-    depth_cm = relative_depth * scaling_factor
-    # Add a non-linear term? Clamp values?
-    # depth_cm = (relative_depth ** 1.5) * 20 
-    return max(0, round(depth_cm, 1)) # Ensure non-negative
-# --- End MiDaS Helpers ---
+    # Extract inputs
+    depth_map = inputs.get('depth_map') # Expecting the full numpy depth map
+    mask_polygon_points = inputs.get('mask_polygon_points') # Expecting [[x1,y1], [x2,y2], ...]
+    shape = depth_map.shape if depth_map is not None else None
 
-# Helper function (example - if needed elsewhere)
-# def some_helper():
+    # Use app logger within the Flask app context
+    if depth_map is None or mask_polygon_points is None or not mask_polygon_points.size or shape is None:
+        app.logger.warning("Depth Calibration skipped: Missing depth_map or mask_polygon_points.")
+        return 0.0
+
+    try:
+        # --- Normalize Depth Map (0-1 range) --- 
+        min_depth = np.min(depth_map)
+        max_depth = np.max(depth_map)
+        if max_depth == min_depth: # Avoid division by zero for flat depth maps
+            normalized_depth_map = np.zeros_like(depth_map)
+            app.logger.warning("Depth Calibration: Depth map is flat, cannot normalize.")
+        else:
+            normalized_depth_map = (depth_map - min_depth) / (max_depth - min_depth)
+        # -----------------------------------------
+
+        # 1. Create boolean mask from polygon
+        inner_mask = create_boolean_mask_from_polygon(mask_polygon_points, shape)
+        if not np.any(inner_mask):
+            app.logger.warning("Depth Calibration skipped: Empty inner mask generated.")
+            return 0.0
+
+        # 2. Define boundary region (dilate mask and subtract inner)
+        kernel_size = max(5, int(min(shape) * 0.015))
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        dilated_mask = cv2.dilate(inner_mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+        boundary_mask = dilated_mask & ~inner_mask
+
+        # 3. Get NORMALIZED depth values
+        norm_depth_values_in_mask = normalized_depth_map[inner_mask]
+        norm_depth_values_on_boundary = normalized_depth_map[boundary_mask]
+
+        if norm_depth_values_in_mask.size == 0 or norm_depth_values_on_boundary.size == 0:
+            if norm_depth_values_in_mask.size == 0:
+                 app.logger.warning("Depth Calibration skipped: No NORMALIZED depth values found in INNER mask.")
+            if norm_depth_values_on_boundary.size == 0:
+                 app.logger.warning("Depth Calibration skipped: No NORMALIZED depth values found in BOUNDARY mask. Mask might be too close to image edge or dilation failed.")
+            return 0.0
+
+        # 4. Calculate key depth percentiles (Robust Statistics)
+        # Assuming LOWER normalized value means FURTHER away (deeper)
+        inner_depth_10th_percentile = np.percentile(norm_depth_values_in_mask, 10)
+        boundary_depth_median = np.median(norm_depth_values_on_boundary)
+        
+        # 5. Calculate relative difference
+        relative_difference = boundary_depth_median - inner_depth_10th_percentile
+        
+        # --- Constants (Require Tuning/Calibration) ---
+        # Use the factor tuned in depth.py - double check this value!
+        DEPTH_SCALING_FACTOR = 200.0 # <--- !! PLACEHOLDER !! Needs tuning!
+        # --- End Constants ---
+
+        estimated_depth_cm = 0.0
+        if relative_difference > 0:
+             estimated_depth_cm = relative_difference * DEPTH_SCALING_FACTOR
+
+        app.logger.debug(f"Depth Calib: NormInner10pct={inner_depth_10th_percentile:.3f}, NormBoundaryMedian={boundary_depth_median:.3f}, NormRelDiff={relative_difference:.3f} -> EstDepth={estimated_depth_cm:.1f}cm (Factor={DEPTH_SCALING_FACTOR})")
+
+        return max(0, round(estimated_depth_cm, 1))
+
+    except Exception as e:
+        # Use app logger and include traceback
+        app.logger.error(f"Error during depth calibration: {e}\n{traceback.format_exc()}")
+        return 0.0
+# --- End: Updated Depth Calibration Function ---
+
+# Helper function (example - if needed elsewhere)# def some_helper():
 #    pass
 # Make sure this is the last function before the end of the file or other non-route code
 
-# ... rest of the file (utility functions etc.) ... 
+@app.route('/road_segments')
+def road_segments():
+    """Display damages grouped into road segments based on geographic proximity."""
+    query = {}
+    if not current_user.is_admin:
+        user_id_str = current_user.get_id()
+        try:
+            # Ensure ObjectId is imported from bson
+            from bson import ObjectId
+            user_id_obj = ObjectId(user_id_str)
+            query['user_id'] = user_id_obj
+        except Exception:
+            query['user_id'] = user_id_str # Fallback if ID isn't ObjectId? Adjust as needed.
+
+    try:
+        # Ensure request is imported from flask
+        from flask import request, render_template
+        # Ensure math is imported
+        import math
+        # Ensure app logger is available (imported from app)
+        from app import app
+        # Ensure Image model is imported
+        from app.models import Image
+        # Ensure Counter, defaultdict are imported
+        from collections import Counter, defaultdict
+        # Ensure helper functions are defined above or imported
+        # (cluster_by_distance, calculate_cluster_center, calculate_cluster_severity, calculate_defect_metrics)
+
+        # Get clustering distance from request, default to 10km
+        cluster_distance_km = float(request.args.get('distance', 10)) # Allow user to set distance
+
+        # Fetch completed images with damage and valid location data
+        images = Image.objects(query).filter(
+            location__exists=True,
+            processing_status='completed',
+            prediction_results__damage_detected=True
+        ).exclude('prediction_results.all_frame_detections') # Exclude large field
+
+        app.logger.info(f"Road Segments: Found {len(images)} images with damage for analysis.")
+
+        if not images:
+            return render_template('road_segments.html', has_data=False, cluster_distance=cluster_distance_km)
+
+        # Prepare data points for clustering
+        points = []
+        image_map = {} # Store full image object for later retrieval
+        for img in images:
+            if img.location and 'latitude' in img.location and 'longitude' in img.location:
+                lat = img.location.get('latitude')
+                lng = img.location.get('longitude')
+                if lat is not None and lng is not None:
+                    try:
+                        point_data = {
+                            'id': str(img.id),
+                            'lat': float(lat),
+                            'lng': float(lng),
+                        }
+                        points.append(point_data)
+                        image_map[str(img.id)] = img
+                    except (ValueError, TypeError):
+                        app.logger.warning(f"Skipping image {img.id} due to invalid coordinates: lat={lat}, lng={lng}")
+                        continue
+
+        if not points:
+             app.logger.warning("Road Segments: No valid points found after filtering coordinates.")
+             return render_template('road_segments.html', has_data=False, cluster_distance=cluster_distance_km)
+
+        # Perform clustering
+        clusters_of_points = cluster_by_distance(points, cluster_distance_km)
+        app.logger.info(f"Road Segments: Generated {len(clusters_of_points)} clusters using {cluster_distance_km}km distance.")
+
+        # Analyze clusters and prepare for template
+        segment_data = []
+        for i, cluster_points in enumerate(clusters_of_points):
+            if not cluster_points: continue
+
+            segment_images = [image_map[p['id']] for p in cluster_points if p['id'] in image_map]
+            if not segment_images: continue
+
+            segment_center = calculate_cluster_center(cluster_points)
+            segment_severity = calculate_cluster_severity(segment_images, cluster_distance_km)
+
+            # Determine Segment Name
+            cluster_name = f"Segment #{i+1}" # Default
+            road_names_in_cluster = [img.location.get('road_name') for img in segment_images if img.location and img.location.get('road_name')]
+            cities_in_cluster = [img.location.get('city') for img in segment_images if img.location and img.location.get('city') and img.location.get('city') != 'Unknown']
+            states_in_cluster = [img.location.get('state') for img in segment_images if img.location and img.location.get('state') and img.location.get('state') != 'Unknown']
+
+            if road_names_in_cluster:
+                most_common_road = Counter(r for r in road_names_in_cluster if r).most_common(1)
+                if most_common_road: cluster_name = most_common_road[0][0]
+            elif cities_in_cluster:
+                most_common_city = Counter(c for c in cities_in_cluster if c).most_common(1)
+                if most_common_city:
+                    cluster_name = most_common_city[0][0]
+                    if states_in_cluster:
+                        most_common_state = Counter(s for s in states_in_cluster if s).most_common(1)
+                        if most_common_state and most_common_state[0][0] != cluster_name:
+                             cluster_name += f", {most_common_state[0][0]}"
+            elif states_in_cluster:
+                most_common_state = Counter(s for s in states_in_cluster if s).most_common(1)
+                if most_common_state: cluster_name = most_common_state[0][0]
+
+            # Calculate Defect Metrics and Summarize
+            segment_damage_counts = defaultdict(int)
+            total_segment_area = 0.0
+            total_segment_depth = 0.0
+            valid_depth_count = 0
+            image_details_for_template = []
+
+            for img in segment_images:
+                metrics = calculate_defect_metrics(img)
+                dmg_type = metrics.get('damage_type', 'Unknown')
+                segment_damage_counts[dmg_type] += 1
+                total_segment_area += metrics.get('area_m2', 0.0)
+                depth = metrics.get('depth_cm', 0.0)
+                if depth > 0:
+                    total_segment_depth += depth
+                    valid_depth_count += 1
+
+                image_details_for_template.append({
+                    'id': str(img.id),
+                    'filename': img.original_filename or img.filename,
+                    'type': dmg_type,
+                    'area': metrics.get('area_m2', 0.0),
+                    'depth': depth,
+                    'severity': metrics.get('severity', 'Low'),
+                    'upload_time': img.upload_time
+                })
+
+            avg_segment_depth = (total_segment_depth / valid_depth_count) if valid_depth_count > 0 else 0.0
+
+            segment_data.append({
+                'id': i + 1,
+                'name': cluster_name,
+                'center': segment_center,
+                'image_count': len(segment_images),
+                'severity': segment_severity,
+                'damage_summary': dict(segment_damage_counts),
+                'total_area_m2': round(total_segment_area, 2),
+                'avg_depth_cm': round(avg_segment_depth, 1),
+                'images': sorted(image_details_for_template, key=lambda x: x['upload_time'], reverse=True)
+            })
+
+        segment_data.sort(key=lambda x: x['name'])
+
+        app.logger.info(f"Road Segments: Prepared data for {len(segment_data)} segments.")
+
+        return render_template('road_segments.html',
+                              has_data=True,
+                              segments=segment_data,
+                              cluster_distance=cluster_distance_km)
+
+    except Exception as e:
+        # Ensure traceback is imported
+        import traceback
+        app.logger.error(f"Error in road_segments route: {str(e)}")
+        app.logger.error(traceback.format_exc())
+        cluster_distance_km = float(request.args.get('distance', 10))
+        return render_template('road_segments.html',
+                             has_data=False,
+                             error_message="An error occurred while generating road segments.",
+                             show_error=True,
+                             cluster_distance=cluster_distance_km)
+# --- End: Road Segments Route ---
+# Helper function (example - if needed elsewhere)# def some_helper():
+#    pass
+# Make sure this is the last function before the end of the file or other non-route code
