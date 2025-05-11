@@ -1793,7 +1793,7 @@ def city_analytics():
 
     try:
         # Get all images with location data
-        images = Image.objects(query).filter(location__exists=True, processing_status='completed')
+        images = Image.objects(**query).filter(location__exists=True, processing_status='completed')
         
         app.logger.info(f"Found {len(images)} images with location data for city analytics")
         
@@ -2016,7 +2016,7 @@ def state_analytics(): # Renamed function
 
     try:
         # Fetch completed images with valid location (including state)
-        images = Image.objects(query).filter(
+        images = Image.objects(**query).filter(
             location__exists=True,
             location__state__exists=True, # Ensure state field exists
             processing_status='completed'
